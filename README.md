@@ -64,7 +64,7 @@ pulseflow_auditor/
 │   │   ├── service.py     # Auditor Intelligence
 │   │   └── models.py      # SQLAlchemy Schema
 ├── tests/                 # Full Unit & Integration test suite
-├── run.sh                 # Master CLI script (UI, API, Test, Docker)
+├── run                # Master CLI script (UI, API, Test, Docker)
 ├── docker-compose.yml     # Container Orchestration
 └── requirements.txt       # Production dependencies
 ```
@@ -78,7 +78,7 @@ The run script is your master control center. It handles environment creation, d
 
 ```Bash
 
-chmod +x run.sh
+chmod +x run
 ./run ui
 ```
 
@@ -89,7 +89,7 @@ Access: http://localhost:8501
 
 ```Bash
 
-./run.sh api
+./run api
 ```
 
 Access: http://localhost:8000/docs
@@ -99,7 +99,7 @@ Access: http://localhost:8000/docs
 
 ```Bash
 
-./run.sh test
+./run test
 ```
 
 4. Production Stack (Docker)
@@ -107,7 +107,7 @@ Access: http://localhost:8000/docs
 
 ```Bash
 
-./run.sh docker
+./run docker
 ```
 
 ## 🔌 Integration Guide
