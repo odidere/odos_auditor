@@ -1,8 +1,6 @@
 # PulseFlow Auditor: Phase 1 (The Auditor)
 
-[![PulseFlow CI/CD](https://github.com/your-repo/pulseflow_auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/your-repo/pulseflow_auditor/actions)
-[![Python: 3.12+](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
-[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](#)
+[![PulseFlow CI/CD](https://github.com/odidere/pulseflow_auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/odidere/pulseflow_auditor/actions)
 
 **PulseFlow Auditor** is a high-performance observability and cost-governance engine designed for enterprise data platforms. It provides deep visibility into Snowflake credit consumption by bridging the gap between raw SQL execution and orchestration metadata.
 

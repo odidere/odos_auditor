@@ -1,91 +1,40 @@
 name: PulseFlow CI/CD
 
+# Trigger the workflow on push or pull request to the main branch
 on:
     push:
         branches: ["main"]
-        tags: ["v*.*.*"] # Also trigger on version tags like v1.0.0
     pull_request:
         branches: ["main"]
 
-env:
-    REGISTRY: ghcr.io
-    IMAGE_NAME: ${{ github.repository }}
-
 jobs:
-    # JOB 1: QUALITY CONTROL
-    test:
-        name: Run Tests
+    build-and-test:
         runs-on: ubuntu-latest
-        permissions:
-            contents: read
 
         steps:
+            # 1. Check out the repository code
             - uses: actions/checkout@v4
 
-            - name: Set up Python 3.10
+            # 2. Set up Python 3.12 environment
+            - name: Set up Python 3.12
               uses: actions/setup-python@v5
               with:
-                  python-version: "3.10"
-                  cache: "pip"
+                  python-version: "3.12"
 
-            - name: Install Dependencies
-              run: |
-                  python -m pip install --upgrade pip
-                  if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-                  pip install pytest httpx
-
-            - name: Run Unit & Integration Tests
-              run: |
-                  export PYTHONPATH=$PYTHONPATH:.
-                  pytest tests/ -v
-
-    # JOB 2: DELIVERY (Runs only if 'test' passes)
-    build-and-push:
-        name: Build Docker Image
-        needs: test # <--- THE SAFETY GATE
-        runs-on: ubuntu-latest
-        # Only push image on main branch or tags, not on PRs
-        if: github.event_name != 'pull_request'
-
-        permissions:
-            contents: read
-            packages: write # Required to push to GHCR
-
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v4
-
-            # Set up Docker Buildx (required for advanced building)
-            - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@v3
-
-            # Login to GitHub Container Registry
-            - name: Log in to the Container registry
-              uses: docker/login-action@v3
+            # 3. Cache dependencies (Optional but speeds up future runs)
+            - name: Cache pip
+              uses: actions/cache@v3
               with:
-                  registry: ${{ env.REGISTRY }}
-                  username: ${{ github.actor }}
-                  password: ${{ secrets.GITHUB_TOKEN }}
+                  path: ~/.cache/pip
+                  key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+                  restore-keys: |
+                      ${{ runner.os }}-pip-
 
-            # Automatically generate tags (e.g., 'main', 'v1.0.0', 'sha-123')
-            - name: Extract metadata (tags, labels)
-              id: meta
-              uses: docker/metadata-action@v5
-              with:
-                  images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-                  tags: |
-                      type=ref,event=branch
-                      type=ref,event=pr
-                      type=semver,pattern={{version}}
-                      type=sha
+            # 4. Ensure the management script is executable
+            - name: Make run script executable
+              run: chmod +x run
 
-            # Build and Push
-            - name: Build and push Docker image
-              uses: docker/build-push-action@v5
-              with:
-                  context: .
-                  push: true
-                  tags: ${{ steps.meta.outputs.tags }}
-                  labels: ${{ steps.meta.outputs.labels }}
-                  cache-from: type=gha
-                  cache-to: type=gha,mode=max
+            # 5. Execute the Test Suite using your custom CLI
+            # This runs the exact same logic as your local machine
+            - name: Run PulseFlow Test Suite
+              run: ./run test
