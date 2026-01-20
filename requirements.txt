@@ -1,0 +1,44 @@
+# ===============================================================
+# PulseFlow Auditor: Phase 1 Requirements (Python 3.12+)
+# ===============================================================
+
+# --- CORE WEB & API FRAMEWORK ---
+# FastAPI for the REST interface, Uvicorn as the high-performance ASGI server
+fastapi>=0.110.0
+uvicorn>=0.28.0
+
+# --- DATABASE & ORM ---
+# SQLAlchemy 2.0+ for modern async-compatible ORM patterns
+sqlalchemy>=2.0.27
+
+# --- DATA PROCESSING & SNOWFLAKE CONNECTIVITY ---
+# High-performance data manipulation and official Snowflake driver
+pandas>=2.2.1
+snowflake-connector-python>=3.7.1
+
+# --- SQL INTELLIGENCE & AST PARSING ---
+# Used for SQL canonicalization, fingerprinting, and complexity analysis
+sqlglot>=23.0.0
+
+# --- INSTRUMENTATION & TELEMETRY ---
+# wrapt handles the robust monkey-patching of the Snowflake driver
+wrapt>=1.16.0
+# networkx manages the directed acyclic graphs (DAGs) for lineage impact
+networkx>=3.2.1
+
+# --- ORCHESTRATION PLUGINS ---
+dagster>=1.6.0
+apache-airflow-providers-snowflake>=5.0.0
+
+# --- USER INTERFACE & VISUALIZATION ---
+# Streamlit for the Control Plane and Plotly for interactive cost charts
+streamlit>=1.32.0
+plotly>=5.19.0
+
+# --- REPORTING ---
+fpdf2>=2.7.0
+
+# --- TESTING & QUALITY ASSURANCE ---
+# Pytest for the test suite, HTTPX for integration testing the FastAPI routes
+pytest>=8.1.0
+httpx>=0.27.0

@@ -1,0 +1,56 @@
+version: "3.8"
+
+services:
+  # 1. PulseFlow API (The System Under Test)
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: uvicorn pulseflow.backend.api:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ../pulseflow.db:/app/pulseflow.db
+      - ../pulseflow:/app/pulseflow # Hot-reload source code
+    ports:
+      - "8000:8000"
+
+  # 2. PulseFlow UI (The Verification Tool)
+  ui:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: streamlit run pulseflow/backend/ui.py --server.port 8501
+    volumes:
+      - ../pulseflow.db:/app/pulseflow.db
+      - ../pulseflow:/app/pulseflow
+    ports:
+      - "8501:8501"
+    environment:
+      - PULSEFLOW_DB_PATH=/app/pulseflow.db
+
+  # 3. Dagster (The Traffic Generator)
+  dagster:
+    build:
+      context: ./dagster
+    volumes:
+      - ../pulseflow.db:/app/pulseflow.db
+      - ./dagster:/opt/dagster/app
+      # MOUNT SOURCE CODE so the plugin works inside Dagster
+      - ../pulseflow:/opt/dagster/app/pulseflow
+      - ./dagster_home:/opt/dagster/dagster_home
+    ports:
+      - "3000:3000"
+    environment:
+      - PYTHONPATH=/opt/dagster/app
+
+  # 4. Grafana (The Observability Check)
+  grafana:
+    image: grafana/grafana-oss:latest
+    ports:
+      - "3001:3000"
+    volumes:
+      - ../pulseflow.db:/var/lib/grafana/pulseflow.db
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_INSTALL_PLUGINS=frser-sqlite-datasource

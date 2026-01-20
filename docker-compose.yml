@@ -1,0 +1,23 @@
+services:
+  pulseflow-api:
+    build: .
+    volumes:
+      - ./data:/app/data
+
+  pulseflow-ui:
+    build: .
+    command: streamlit run pulseflow/backend/ui.py --server.port 8501
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+
+  # OPTIONAL: Production Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/var/lib/sqlite_data
+    environment:
+      - GF_INSTALL_PLUGINS=frser-sqlite-datasource

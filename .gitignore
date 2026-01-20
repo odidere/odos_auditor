@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Database (CRITICAL: Do not upload your test data)
+*.db
+*.sqlite
+pulseflow.db
+
+# Environment Variables
+.env
+
+# Docker & Logs
+docker-compose.override.yml
+logs/
+*.log
+
+# Dagster & Airflow
+dagster_home/
+airflow/logs/
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db
