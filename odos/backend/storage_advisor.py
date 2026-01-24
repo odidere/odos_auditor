@@ -7,9 +7,9 @@ from odos.backend.config_loader import CONFIG
 
 
 class StorageAdvisor:
-    def __init__(self) -> None:
+    def __init__(self, conn=None) -> None:
         # 1. Establish Connection
-        self.conn = snowflake.connector.connect(
+        self.conn = conn or snowflake.connector.connect(
             user=os.getenv("SNOWFLAKE_USER"),
             password=os.getenv("SNOWFLAKE_PASSWORD"),
             account=os.getenv("SNOWFLAKE_ACCOUNT"),
