@@ -1,203 +1,175 @@
-# PulseFlow Auditor: Phase 1 (The Auditor)
+# Odos Auditor
 
-[![PulseFlow CI/CD](https://github.com/odidere/pulseflow_auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/odidere/pulseflow_auditor/actions)
+[![Odos CI (Unit Only)](https://github.com/odidere/odos_auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/odidere/odos_auditor/actions)
 
-**PulseFlow Auditor** is a high-performance observability and cost-governance engine designed for enterprise data platforms. It provides deep visibility into Snowflake credit consumption by bridging the gap between raw SQL execution and orchestration metadata.
+**Odos Auditor** is a high-performance observability and cost-governance engine designed for enterprise data platforms. It provides deep visibility into Snowflake credit consumption by bridging the gap between raw SQL execution and orchestration metadata.
 
-By intercepting queries at the driver level, PulseFlow identifies **"Zombie" tasks**, **Infrastructure Waste**, and **Downstream SLA Risks** with zero-to-minimal code changes.
+By intercepting queries at the driver level, Odos identifies **"Zombie" tasks**, **Infrastructure Waste**, and **Downstream SLA Risks** with zero-to-minimal code changes.
 
 ---
 
 ## 🏗 System Architecture
 
-PulseFlow is designed with a "Fail-Open" philosophy, ensuring that observability never compromises production stability.
+Odos is designed with a "Fail-Open" philosophy, ensuring that observability never compromises production stability.
 
-1.  **The Agent (Instrumentation):** Injects metadata into SQL comments and performs pre-flight AST analysis using `sqlglot`.
-2.  **The Service (Intelligence):** Calculates statistical baselines (EMA) to detect cost drift and evaluates warehouse sizing.
+1.  **The Agent (Instrumentation):** Injects metadata into SQL comments and performs pre-flight AST analysis.
+2.  **The Service (Intelligence):** Uses **SQLAlchemy 2.0** to manage high-concurrency state and calculate statistical baselines (EMA) for cost drift.
 3.  **The Control Plane (UI):** A Streamlit-based dashboard for financial forecasting and remediation.
-4.  **The Persistence (Source of Truth):** A relational database storing query fingerprints, departmental budgets, and lineage graphs.
+4.  **The Persistence:** A relational database (PostgreSQL/SQLite) storing normalized query fingerprints and lineage graphs.
 
 ---
+
+## 🛠 Prerequisites & Environment
+
+Odos leverages modern Python features (PEP 695) and requires:
+
+- **Python:** 3.12+
+- **Database:** PostgreSQL 15+ (Production) or SQLite (Dev)
+- **Libraries:** `sqlalchemy>=2.0`, `sqlglot`, `pandas`, `fpdf2`, `openai`, `google-genai`
+
+### Environment Configuration (`.env`)
+
+Odos requires a `.env` file in the root directory for credential management:
+
+```env
+# Database
+POSTGRES_USER=your_user
+POSTGRES_PASSWORD=your_secure_password
+POSTGRES_DB=odos_observability
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+
+# AI Intelligence (Required for optimize_sql)
+OPENAI_API_KEY=sk-xxxx
+GEMINI_API_KEY=AIzaSy-xxxx
+```
 
 ## 🚀 Key Modules
 
-### 1. Multi-Interface Agent (`pulseflow.agent`)
-
-Supports three distinct integration patterns:
+### 1. Multi-Interface Agent (`odos.agent`)
 
 - **Monkey Patching:** Global, zero-touch observability via `instrument_all()`.
-- **Decorators:** Explicit function-level tracking via `@pulse_audit`.
-- **Orchestrator Plugins:** Native hooks for **Apache Airflow** and **Dagster**.
+- **Decorators:** Explicit function-level tracking via `@track_pipeline`.
 
-### 2. SQL Structural Analyzer
+### 2. AI Surgeon (`odos.backend.surgeon`)
 
-Uses Abstract Syntax Tree (AST) parsing to:
+The Surgeon module provides automated remediation for identified waste.
 
-- **Fingerprint Queries:** Normalizes SQL (removes comments/whitespace) to track the "DNA" of a query over time.
-- **Complexity Scoring:** Identifies high-complexity logic running on under-powered warehouses.
+[Image of a software architecture diagram showing an AI agent fallback mechanism between OpenAI and Google Gemini]
 
-### 3. Warehouse Right-Sizing Advisor (`pulseflow.backend.advisor`)
-
-Implements two primary cost-saving signals:
-
-- **Signal 1 (The Ferrari in Traffic):** High-tier warehouses (Large+) running sub-10s queries.
-- **Signal 2 (The Idle Burner):** Warehouses with high costs but low query volume/concurrency.
-
-### 4. Impact & SLA Analyzer (`pulseflow.backend.lineage`)
-
-- **Blast Radius:** Identifies every downstream dashboard or ML model affected by an upstream anomaly.
-- **Critical Path Delay:** Estimates SLA violation risks based on upstream duration increases.
+- **`optimize_sql`**: Performs dual-model (OpenAI/Gemini) analysis to rewrite inefficient SQL.
+- **`diagnose_pipeline_failure`**: Analyzes stack traces to identify root causes in real-time.
 
 ---
 
-## 🛠 Project Structure
-
-```text
-pulseflow_auditor/
-├── pulseflow/
-│   ├── agent/             # Instrumentation (Patching, Airflow Plugin, Dagster Resource)
-│   ├── backend/           # Core Logic
-│   │   ├── api.py         # FastAPI Endpoints
-│   │   ├── ui.py          # Streamlit Dashboard
-│   │   ├── service.py     # Auditor Intelligence
-│   │   └── models.py      # SQLAlchemy Schema
-├── tests/                 # Full Unit & Integration test suite
-├── run                # Master CLI script (UI, API, Test, Docker)
-├── docker-compose.yml     # Container Orchestration
-└── requirements.txt       # Production dependencies
-```
-
 ## 🚥 Quick Start & CLI
 
-The run script is your master control center. It handles environment creation, database seeding, and execution.
+The `run` script is your master control center.
 
-1. Launch the Control Plane (UI)
-   Start the developer dashboard to view costs and financial projections.
+### Launch the Control Plane (UI)
 
 ```Bash
-
 chmod +x run
 ./run ui
 ```
 
-Access: http://localhost:8501
-
-2. Launch the API
-   Start the REST interface for automated auditing.
+### Launch the API
 
 ```Bash
 
 ./run api
 ```
 
-Access: http://localhost:8000/docs
-
-3. Run the Test Suite
-   Validate the logic with the full pytest suite.
+### Run the Test Suite
 
 ```Bash
-
 ./run test
 ```
 
-4. Production Stack (Docker)
-   Build and launch API, UI, and Grafana simultaneously.
+## 🧪 Testing Strategy
 
-```Bash
+Odos maintains a rigorous testing suite divided into two tiers:
 
-./run docker
-```
+### Unit Tests (`tests/unit/`)
 
-## 🔌 Integration Guide
+- Math Logic: Validates Exponential Moving Average (EMA) and ROI calculations.
+- Mocking: Uses pytest-mock to simulate Snowflake and AI provider responses, requiring no active API keys or live database.
+- Execution: `pytest tests/unit/`
 
-Apache Airflow Integration
-PulseFlow provides two ways to integrate with Airflow: a Drop-in Operator for specific tasks, or a Global Policy for platform-wide coverage.
+### Integration Tests (tests/integration/)
 
-Option A: The PulseFlow Operator (Drop-in)
-
-```Python
-from airflow import DAG
-from pulseflow.agent.airflow_plugin import PulseFlowSnowflakeOperator
-
-# Automatically tags queries with DAG_ID and TASK_ID
-audit_task = PulseFlowSnowflakeOperator(
-    task_id="calc_waste",
-    sql="CALL calculate_daily_waste();",
-    snowflake_conn_id="snowflake_default"
-)
-```
-
-**Option B: Global Cluster Policy (Zero-Touch)** Instrument every Snowflake task in your Airflow environment by adding this to `airflow_local_settings.py`:
-
-```Python
-
-from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
-from pulseflow.agent.instrument import PulseFlowContext
-
-def task_policy(task):
-    if isinstance(task, SnowflakeOperator):
-        original_pre = task.pre_execute
-        def pf_wrapper(context):
-            PulseFlowContext.set_context(dag_id=task.dag_id, task_id=task.task_id)
-            if original_pre: original_pre(context)
-        task.pre_execute = pf_wrapper
-```
-
-### Dagster Integration
-
-Use the PulseFlowResource to automatically instrument your assets.
-
-```Python
-
-from dagster import asset
-from pulseflow.agent.dagster_plugin import PulseFlowResource
-
-@asset
-def raw_customers(context, pf: PulseFlowResource):
-    # The resource automatically captures the asset key as the Task ID
-    pf.execute_query("COPY INTO raw_customers FROM @stage/cust_data")
-```
-
-## 📊 Dashboard & Monitoring
-
-Streamlit Control Plane (Dev)
-
-- URL: http://localhost:8501
-- Purpose: Financial forecasting, annual burn projection, and "Zombie" remediation.
-- Key Metric: Infra-Tax Rate (Percentage of revenue spent on Snowflake).
-
-Grafana (Production)
-
-- URL: http://localhost:3000 (Default credentials: admin/admin)
-- Data Source: SQLite (pulseflow.db)
-- Purpose: Long-term alerts, severity trends, and NOC monitoring.
+- Database: Validates SQLAlchemy 2.0 mappings against a live Postgres/SQLite instance.
+- Intelligence: Verifies the EnterpriseAuditor can establish baselines and detect "Whale" cost spikes.
+- Execution: `./run_tests.sh` (Auto-loads `.env`)
 
 ## 🛡 Security & Safety Guardrails
 
-- Fail-Open Logic: If the metadata injection fails, the original query is executed unmodified.
+- Fail-Open Logic: If metadata injection fails, the original query executes unmodified.
 - Performance Circuit Breaker: Queries exceeding 50KB bypass static analysis to prevent driver-side latency.
-- Thread Isolation: Uses threading.local to ensure concurrent tasks (e.g., in Dagster/Airflow) do not leak metadata.
-- Canonicalization: SQL is normalized to prevent redundant alerts for minor formatting changes.
+- Privacy: SQL is canonicalized (normalized) locally before being sent to AI providers for diagnosis.
 
-📡 API Endpoints
+### ⚙️ Configuration Files
 
-| Endpoint                |  Method  | Description                                                     |
-| :---------------------- | :------: | :-------------------------------------------------------------- |
-| `/api/v1/audit/run`     | **POST** | Triggers a full audit cycle (Anomaly Detection + Right-sizing). |
-| `/api/v1/audit/history` | **GET**  | Returns historical audit events with blast radius analysis.     |
-| `/api/v1/infra/advisor` | **GET**  | Returns warehouse downsizing recommendations.                   |
+`.github/workflows/ci.yml`
 
-## 🧪 Testing Suite
+```
+name: Odos CI (Unit Only)
 
-PulseFlow uses pytest for robust validation. The suite includes:
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
 
-- Unit Tests: Validating SQL canonicalization and statistical EMA math.
-- Integration Tests: End-to-end checks from agent injection to persistent DB state.
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
 
-To run tests manually:
+    steps:
+      - uses: actions/checkout@v4
 
-```Bash
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-export PYTHONPATH=$PYTHONPATH:.
-pytest tests/ -v
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-mock sqlalchemy pandas fpdf2 openai google-genai psycopg2-binary sqlglot
+
+      - name: Make run script executable
+        run: chmod +x run
+
+      # Run unit tests only; these use mocks and don't require Postgres
+      - name: Run Odos Unit Tests
+        env:
+          OPENAI_API_KEY: "sk-unit-test-fake-key"
+          GEMINI_API_KEY: "gm-unit-test-fake-key"
+        run: pytest tests/unit/
+```
+
+`run_tests.sh`
+
+```
+#!/bin/bash
+
+# Load Environment Variables from .env
+if [ -f .env ]; then
+    echo "Reading .env file..."
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "❌ Error: .env file not found. Ensure POSTGRES_PASSWORD is set for integration tests."
+    exit 1
+fi
+
+# Set additional test-specific variables
+export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-fake"}
+export GEMINI_API_KEY=${GEMINI_API_KEY:-"gm-fake"}
+
+echo "🧪 Running Odos Unit Tests..."
+pytest tests/unit/
+
+echo "🔗 Running Odos Integration Tests..."
+pytest tests/integration/
 ```

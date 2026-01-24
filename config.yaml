@@ -1,0 +1,51 @@
+project:
+  name: "Odos Data Engineering Operating System"
+  environment: "demo"
+
+app:
+  budget_cap: 5000
+
+database:
+  host: "localhost"
+  port: 5432
+  user: "user"
+  dbname: "odos_observability"
+
+observability:
+  odos_export: true   # Send to our UI (Postgres)
+  otlp_export: false  # Send to Prometheus/Jaeger (via OTel Collector)
+  otlp_endpoint: "http://localhost:4317"
+
+
+slack:
+  enabled: true
+  webhook_url: "https://hooks.slack.com/services/..."
+
+# ----------------------------------------------------
+# 🧠 BUSINESS LOGIC & RULES
+# ----------------------------------------------------
+rules:
+  ghost_tables:
+    days_since_last_access: 90
+    min_size_bytes: 1024       # 1KB (Demo) vs 1073741824 (1GB Prod)
+  
+  cold_data:
+    min_data_age_days: 365
+    min_size_bytes: 1024       # 1KB (Demo) vs 1099511627776 (1TB Prod)
+    target_tables_regex: "%(LOG|EVENT|HISTORY)%"
+
+  clustering:
+    min_scan_ratio: 0.0        # 0.0 (Demo) vs 0.9 (Prod)
+    min_size_bytes: 1024       # 1KB (Demo) vs 10GB Prod
+    min_partitions: 0          # 0 (Demo) vs 100 (Prod)
+
+costs:
+  storage_price_per_tb_mo: 23.00
+  compute_credit_price: 3.00
+  
+anomalies:
+  high_severity_threshold_usd: 15.0
+  lookback_days: 30
+
+security:
+  auth_enabled: true

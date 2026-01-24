@@ -1,101 +1,20 @@
 #!/bin/bash
+# run_tests.sh
 
-# --- CONFIGURATION ---
-VENV_DIR=".venv"
-REQ_FILE="requirements.txt"
-PROJECT_NAME="PulseFlow Auditor"
-DB_FILE="pulseflow.db"
-
-echo "------------------------------------------------"
-echo "🚀 $PROJECT_NAME Management CLI"
-echo "------------------------------------------------"
-
-# 1. BOOTSTRAP ENVIRONMENT
-if [ ! -d "$VENV_DIR" ]; then
-    echo "📦 Creating virtual environment..."
-    python3.12 -m venv "$VENV_DIR" || python3 -m venv "$VENV_DIR"
+# 1. Load Credentials
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "⚠️  No .env found. Ensure POSTGRES_PASSWORD is set manually."
 fi
 
-source "$VENV_DIR/bin/activate"
+# 2. Python Version Check (Requirement for [T] syntax)
+PYTHON_VER=$(python3 -c 'import sys; print(sys.version_info[:2] >= (3, 12))')
+if [ "$PYTHON_VER" = "False" ]; then
+    echo "❌ Error: Odos Service requires Python 3.12+ for Type Parameter syntax."
+    exit 1
+fi
 
-# 2. ENSURE DEPENDENCIES
-echo "📥 Syncing dependencies..."
-pip install --upgrade pip &> /dev/null
-pip install -r "$REQ_FILE" &> /dev/null
-
-# 3. DATABASE INITIALIZATION & SEEDING
-# This ensures the DB is ready before ANY command runs.
-echo "🗄️  Initializing Database & Cost Centers..."
-python3 << END
-import os
-from pulseflow.backend.models import Base, CostCenter
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-engine = create_engine("sqlite:///$DB_FILE")
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
-session = Session()
-
-# Seed default Cost Centers if the table is empty
-if not session.query(CostCenter).first():
-    print("🌱 Seeding enterprise Cost Centers (Marketing, Engineering, Data-Science)...")
-    session.add_all([
-        CostCenter(name="Marketing", pattern="mktg_%", daily_budget_usd=500.0),
-        CostCenter(name="Engineering", pattern="eng_%", daily_budget_usd=1500.0),
-        CostCenter(name="Data-Science", pattern="ml_%", daily_budget_usd=1000.0)
-    ])
-    session.commit()
-session.close()
-END
-
-# 4. COMMAND ROUTING
-case "$1" in
-    "test")
-        echo "🧪 Running Test Suite..."
-        export PYTHONPATH=$PYTHONPATH:.
-        pytest tests/ -v -W ignore::DeprecationWarning
-        ;;
-    "ui")
-        echo "🖥️  Launching Streamlit Control Plane..."
-        streamlit run pulseflow/backend/ui.py --server.port 8501
-        ;;
-    "api")
-        echo "🔌 Launching FastAPI Auditor..."
-        uvicorn pulseflow.backend.api:app --reload
-        ;;
-    "docker")
-        echo "🐳 Starting full Docker stack..."
-        docker-compose up --build
-        ;;
-    "system-test")
-        echo "🧪 Initializing System Integration Test Environment..."
-        
-        # 1. Seed the DB with History
-        if [ -f "system_testing/scripts/seed_scenarios.py" ]; then
-            echo "🌱 Seeding scenario history..."
-            cd system_testing/scripts
-            python3 seed_scenarios.py
-            cd ../..
-        else
-            echo "⚠️ Warning: Seeding script not found. Skipping history generation."
-        fi
-        
-        # 2. Launch the Cluster
-        echo "🐳 Starting Test Cluster (Dagster + Grafana + UI)..."
-        if [ -f "system_testing/docker-compose.test.yml" ]; then
-            docker-compose -f system_testing/docker-compose.test.yml up --build
-        else
-            echo "❌ Error: Test docker-compose file not found."
-            exit 1
-        fi
-        ;;
-    *)
-        echo "Usage: ./run.sh [test|ui|api|docker|system-test]"
-        echo "  test        : Runs all unit and integration tests"
-        echo "  ui          : Launches the Streamlit developer dashboard"
-        echo "  api         : Launches the FastAPI backend"
-        echo "  docker      : Starts the containerized production stack"
-        echo "  system-test : Starts the Dagster+Grafana simulation environment"
-        ;;
-esac
+# 3. Execution
+echo "🚀 Running Odos Intelligence Suite..."
+pytest tests/unit/ tests/integration/

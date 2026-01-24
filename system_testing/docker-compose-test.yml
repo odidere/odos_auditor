@@ -1,0 +1,103 @@
+version: "3.8"
+
+services:
+  # 1. THE DATABASE (Replaces SQLite file)
+  postgres:
+    image: postgres:15-alpine
+    container_name: odos_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user} # Reads from .env
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password} # Reads from .env
+      POSTGRES_DB: ${POSTGRES_DB:-odos_observability}
+    ports:
+      - "5432:5432" # Expose to host so ./run init-db works
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Odos API (System Under Test)
+  #api:
+  #  build:
+  #    context: ..
+  #    dockerfile: Dockerfile
+  #  command: uvicorn odos.backend.api:app --host 0.0.0.0 --port 8000
+  #  depends_on:
+  #    postgres:
+  #      condition: service_healthy
+  #  environment:
+  #    - DB_HOST=postgres
+  #    - DB_PORT=5432
+  #    - DB_USER=${POSTGRES_USER}
+  #    - DB_PASS=${POSTGRES_PASSWORD}
+  #    - DB_NAME=${POSTGRES_DB}
+  #    - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+  #  ports:
+  #    - "8000:8000"
+  #  volumes:
+  #    - ../odos:/app/odos
+
+  # 3. Odos UI (The Commander)
+  #ui:
+  #  build:
+  #    context: ..
+  #    dockerfile: Dockerfile
+  #  command: streamlit run odos/backend/ui.py --server.port 8501
+  #  depends_on:
+  #    postgres:
+  #      condition: service_healthy
+  #  environment:
+  #    - DB_HOST=postgres
+  #    - DB_PORT=5432
+  #    - DB_USER=${POSTGRES_USER}
+  #    - DB_PASS=${POSTGRES_PASSWORD}
+  #    - DB_NAME=${POSTGRES_DB}
+  #    # OTel Configuration
+  #    - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+  #    # API Keys (Now using variable references)
+  #    - OPENAI_API_KEY=${OPENAI_API_KEY}
+  #    - GEMINI_API_KEY=${GEMINI_API_KEY}
+  #  ports:
+  #    - "8501:8501"
+  #  volumes:
+  #    - ../odos:/app/odos
+  #    - ./test_artifacts:/app/artifacts
+
+  # 4. OpenTelemetry Collector (The Router)
+  #otel-collector:
+  #  image: otel/opentelemetry-collector-contrib:latest
+  #  command: ["--config=/etc/otel-collector-config.yaml"]
+  #  volumes:
+  #    - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+  #  ports:
+  #    - "4317:4317" # OTLP gRPC
+  #    - "4318:4318" # OTLP HTTP
+
+  # 5. Prometheus (The Metrics Store)
+  #prometheus:
+  #  image: prom/prometheus:latest
+  #  command: ["--config.file=/etc/prometheus/prometheus.yml"]
+  #  volumes:
+  #    - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  #  ports:
+  #    - "9090:9090"
+
+  # 6. Grafana (The Observability Dashboard)
+  #grafana:
+  #  image: grafana/grafana-oss:latest
+  #  ports:
+  #    - "3001:3000"
+  #  depends_on:
+  #    - postgres
+  #    - prometheus
+  #  environment:
+  #    - GF_AUTH_ANONYMOUS_ENABLED=true
+  #    - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+  #  volumes:
+  #    - ./grafana/provisioning:/etc/grafana/provisioning
+
+volumes:
+  postgres_data:

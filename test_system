@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# --- CONFIGURATION ---
+# Use absolute path for artifacts to prevent confusion
+ROOT_DIR=$(pwd)
+ARTIFACTS_DIR="$ROOT_DIR/system_testing/test_artifacts"
+DATASET_FILE="$ARTIFACTS_DIR/odos_finetuning_dataset.jsonl"
+
+# Load secrets from .env file if it exists (but don't fail if it doesn't)
+if [ -f ".env" ]; then
+    export $(grep -v '^#' .env | xargs)
+fi
+
+echo "------------------------------------------------"
+echo "🧪 Odos System Integration Suite"
+echo "------------------------------------------------"
+
+# 1. ENVIRONMENT SETUP
+echo "🛠️  Setting up Test Environment..."
+
+if [ ! -d "$ARTIFACTS_DIR" ]; then
+    mkdir -p "$ARTIFACTS_DIR"
+    echo "   - Created artifacts directory: $ARTIFACTS_DIR"
+fi
+
+# Export Credentials (Prefer ENV variables, default to MOCKS)
+# This ensures tests pass in CI/CD without leaking real keys
+export OPENAI_API_KEY="${OPENAI_API_KEY:-test-openai-key}"
+export GEMINI_API_KEY="${GEMINI_API_KEY:-mock-gemini-key}"
+
+# Export Snowflake Config (Prefer ENV variables, default to MOCKS)
+export SNOWFLAKE_ACCOUNT="${SNOWFLAKE_ACCOUNT:-mock-account}"
+export SNOWFLAKE_USER="${SNOWFLAKE_USER:-mock-user}"
+export SNOWFLAKE_PASSWORD="${SNOWFLAKE_PASSWORD:-mock-password}"
+export SNOWFLAKE_WAREHOUSE="${SNOWFLAKE_WAREHOUSE:-PULSEFLOW_TEST_WH}"
+
+# Critical: Tell Python where the dataset should go
+export PULSEFLOW_DATASET_PATH="$DATASET_FILE"
+
+# Critical: Add current dir to python path
+export PYTHONPATH="$ROOT_DIR"
+
+# 2. DATABASE SEEDING
+# LOCAL SEEDING (For UI)
+if [ -f "system_testing/scripts/seed_scenarios.py" ]; then
+    echo "🌱 Seeding scenario history..."
+    python3 system_testing/scripts/seed_scenarios.py
+else
+    echo "⚠️  Warning: Seeding script not found."
+fi
+
+# REMOTE PROVISIONING (For Storage Advisor)
+# Only runs if REAL credentials are provided in .env
+if [ "$SNOWFLAKE_ACCOUNT" != "mock-account" ] && [ "$SNOWFLAKE_PASSWORD" != "mock-password" ]; then
+    echo "❄️  Provisioning Real Snowflake Assets..."
+    python3 system_testing/scripts/provision_snowflake.py
+else
+    echo "⚠️  Skipping Snowflake Provisioning (Using Mock Mode)"
+fi
+
+# 3. RUN VERIFICATION
+echo "🚀 Executing Verification Logic..."
+
+if [ -f "system_testing/scripts/verify_system.py" ]; then
+    # Run from ROOT. The python script now handles the imports correctly.
+    python3 system_testing/scripts/verify_system.py
+    EXIT_CODE=$?
+else
+    echo "❌ Error: 'verify_system.py' not found."
+    exit 1
+fi
+
+# 4. REPORTING
+echo "------------------------------------------------"
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "✅ SYSTEM INTEGRATION TEST PASSED"
+    exit 0
+else
+    echo "❌ SYSTEM INTEGRATION TEST FAILED"
+    exit 1
+fi

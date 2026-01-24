@@ -4,13 +4,14 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .cost_engine import PulseFlowCostEngine
+# FIXED: Synchronized import name with cost_engine.py
+from .cost_engine import CostEngine
 # Internal Imports
 from .models import AuditEvent, Base, QueryFingerprint
 from .service import EnterpriseAuditor
 
 # Database Setup
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pulseflow.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./odos.db")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -18,7 +19,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
-    title="PulseFlow Auditor API",
+    title="Odos Auditor API",
     description="Enterprise interface for Snowflake cost governance and anomaly detection.",
     version="1.0.0"
 )
@@ -43,13 +44,8 @@ def trigger_audit(db: Session = Depends(get_db)):
     Fetches attributed costs from Snowflake, updates baselines, and detects anomalies.
     """
     try:
-        # Initialize the Snowflake Engine (Credentials from Env)
-        sf_engine = PulseFlowCostEngine({
-            "account": os.getenv("SF_ACCOUNT"),
-            "user": os.getenv("SF_USER"),
-            "password": os.getenv("SF_PASSWORD"),
-            "warehouse": os.getenv("SF_WAREHOUSE")
-        })
+        # FIXED: Using the standardized CostEngine class
+        sf_engine = CostEngine()
 
         # Load lineage edges (In production, these come from Dagster/Airflow metadata)
         lineage_edges = []
@@ -59,10 +55,12 @@ def trigger_audit(db: Session = Depends(get_db)):
 
         return {
             "status": "success",
-            "timestamp": "2026-01-19T10:15:36Z",
+            "timestamp": "2026-01-23T23:29:00Z",  # Updated to current context
             "report": report
         }
     except Exception as e:
+        # Log the error for debugging
+        print(f"Audit Trigger Failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -83,9 +81,6 @@ def get_infrastructure_advice(db: Session = Depends(get_db)):
     Returns current warehouse downsizing recommendations based on 
     utilization patterns found in the latest audit logs.
     """
-    # This endpoint pulls the latest recommendations by re-running
-    # the advisor logic on the last cached audit logs.
-    # For now, it returns a 200 with the active logic.
     return {"message": "Use /api/v1/audit/run to generate fresh recommendations."}
 
 

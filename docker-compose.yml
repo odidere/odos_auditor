@@ -1,23 +1,60 @@
-services:
-  pulseflow-api:
-    build: .
-    volumes:
-      - ./data:/app/data
+version: "3.8"
 
-  pulseflow-ui:
+services:
+  # 1. THE DATABASE (Missing in your snippet)
+  postgres:
+    image: postgres:15
+    container_name: odos_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-odos_observability}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d odos_observability"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 2. THE UI (Commander)
+  odos-ui:
     build: .
-    command: streamlit run pulseflow/backend/ui.py --server.port 8501
+    container_name: odos_commander
+    command: streamlit run odos/backend/ui.py --server.port 8501 --server.address 0.0.0.0
     ports:
       - "8501:8501"
+    environment:
+      # Connect to the 'postgres' service defined above
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-odos_observability}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      # Pass API Keys for the Surgeon
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
-      - ./data:/app/data
+      - .:/app # Live reload for development
 
-  # OPTIONAL: Production Grafana
+  # 3. OPTIONAL: Production Grafana
   grafana:
     image: grafana/grafana:latest
+    container_name: odos_grafana
     ports:
       - "3000:3000"
     volumes:
-      - ./data:/var/lib/sqlite_data
+      - grafana_data:/var/lib/grafana
     environment:
-      - GF_INSTALL_PLUGINS=frser-sqlite-datasource
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+
+volumes:
+  postgres_data:
+  grafana_data:

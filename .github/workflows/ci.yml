@@ -1,6 +1,5 @@
-name: PulseFlow CI/CD
+name: Odos CI (Unit Only)
 
-# Trigger the workflow on push or pull request to the main branch
 on:
     push:
         branches: ["main"]
@@ -8,33 +7,28 @@ on:
         branches: ["main"]
 
 jobs:
-    build-and-test:
+    unit-tests:
         runs-on: ubuntu-latest
 
         steps:
-            # 1. Check out the repository code
             - uses: actions/checkout@v4
 
-            # 2. Set up Python 3.12 environment
             - name: Set up Python 3.12
               uses: actions/setup-python@v5
               with:
                   python-version: "3.12"
 
-            # 3. Cache dependencies (Optional but speeds up future runs)
-            - name: Cache pip
-              uses: actions/cache@v3
-              with:
-                  path: ~/.cache/pip
-                  key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-                  restore-keys: |
-                      ${{ runner.os }}-pip-
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install pytest pytest-mock sqlalchemy pandas fpdf2 openai google-genai
 
-            # 4. Ensure the management script is executable
             - name: Make run script executable
               run: chmod +x run
 
-            # 5. Execute the Test Suite using your custom CLI
-            # This runs the exact same logic as your local machine
-            - name: Run PulseFlow Test Suite
-              run: ./run test
+            # Only run unit tests; skips everything else
+            - name: Run Odos Unit Tests
+              env:
+                  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+                  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+              run: pytest tests/unit/

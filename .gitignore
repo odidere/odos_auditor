@@ -8,7 +8,7 @@ venv/
 # Database (CRITICAL: Do not upload your test data)
 *.db
 *.sqlite
-pulseflow.db
+odos.db
 
 # Environment Variables
 .env
@@ -34,3 +34,6 @@ htmlcov/
 # System
 .DS_Store
 Thumbs.db
+system_testing/logs/
+system_testing/data/
+system_testing/__pycache__/
