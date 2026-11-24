@@ -1,22 +1,29 @@
-from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
+"""Optional Airflow cluster policy: tag queries from *every* task, no DAG changes.
 
-from odos.agent.instrument import OdosContext
+Copy (or import) this ``task_policy`` into your ``airflow_local_settings.py``.
+The context is set in ``pre_execute`` and cleared in ``post_execute``.
+"""
+from __future__ import annotations
+
+from odos.agent.airflow_plugin import airflow_context_kwargs
+from odos.agent.context import OdosContext
+from odos.agent.instrument import instrument_all
 
 
-def task_policy(task):
-    """
-    Automatically inject Odos auditing into any Snowflake task.
-    """
-    if isinstance(task, SnowflakeOperator):
-        # We wrap the pre_execute hook to set context
-        original_pre_execute = task.pre_execute
+def task_policy(task) -> None:
+    original_pre = task.pre_execute
+    original_post = task.post_execute
 
-        def odos_wrapper(context):
-            OdosContext.set_context(
-                dag_id=task.dag_id,
-                task_id=task.task_id
-            )
-            if original_pre_execute:
-                original_pre_execute(context)
+    def odos_pre_execute(context, *args, **kwargs):
+        instrument_all()
+        OdosContext.set_context(**airflow_context_kwargs(context))
+        return original_pre(context, *args, **kwargs)
 
-        task.pre_execute = odos_wrapper
+    def odos_post_execute(context, *args, **kwargs):
+        try:
+            return original_post(context, *args, **kwargs)
+        finally:
+            OdosContext.clear()
+
+    task.pre_execute = odos_pre_execute
+    task.post_execute = odos_post_execute

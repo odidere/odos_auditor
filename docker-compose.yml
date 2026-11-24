@@ -1,60 +1,43 @@
-version: "3.8"
-
 services:
-  # 1. THE DATABASE (Missing in your snippet)
   postgres:
-    image: postgres:15
-    container_name: odos_db
-    restart: always
+    image: postgres:16
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_USER: ${POSTGRES_USER:-odos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-odos_observability}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d odos_observability"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # 2. THE UI (Commander)
-  odos-ui:
+  api:
     build: .
-    container_name: odos_commander
-    command: streamlit run odos/backend/ui.py --server.port 8501 --server.address 0.0.0.0
-    ports:
-      - "8501:8501"
+    env_file: .env
     environment:
-      # Connect to the 'postgres' service defined above
       POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-odos_observability}
-      POSTGRES_USER: ${POSTGRES_USER:-user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      # Pass API Keys for the Surgeon
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - .:/app # Live reload for development
 
-  # 3. OPTIONAL: Production Grafana
-  grafana:
-    image: grafana/grafana:latest
-    container_name: odos_grafana
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
+  ui:
+    build: .
+    command: ["streamlit", "run", "odos/backend/ui.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+    env_file: .env
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      POSTGRES_HOST: postgres
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
-  grafana_data:

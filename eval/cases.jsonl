@@ -1,0 +1,12 @@
+{"id": "select_star_wide", "sql": "SELECT * FROM analytics.events WHERE event_date >= '2026-01-01'", "expect_any": ["select *", "column", "projection", "prun"]}
+{"id": "function_on_filter_column", "sql": "SELECT order_id, amount FROM sales.orders WHERE TO_DATE(created_at) = '2026-01-15'", "expect_any": ["sargable", "prun", "range", "function"]}
+{"id": "union_dedup", "sql": "SELECT order_id FROM sales.orders_2025 UNION SELECT order_id FROM sales.orders_2026", "expect_any": ["union all"]}
+{"id": "count_distinct_large", "sql": "SELECT event_date, COUNT(DISTINCT user_id) FROM analytics.events GROUP BY event_date", "expect_any": ["approx", "hll"]}
+{"id": "order_by_in_subquery", "sql": "SELECT customer_id FROM (SELECT * FROM sales.orders ORDER BY created_at) t WHERE status = 'PAID'", "expect_any": ["order by", "sort"]}
+{"id": "repeated_subquery", "sql": "SELECT a.region, a.total, b.total FROM (SELECT region, SUM(amount) total FROM sales.orders WHERE status = 'PAID' GROUP BY region) a JOIN (SELECT region, SUM(amount) total FROM sales.orders WHERE status = 'PAID' GROUP BY region) b ON a.region = b.region", "expect_any": ["cte", "with", "reuse", "duplicate", "once"]}
+{"id": "missing_join_condition", "sql": "SELECT o.order_id, c.name FROM sales.orders o, crm.customers c WHERE o.amount > 100", "expect_any": ["join", "cartesian", "cross"]}
+{"id": "distinct_after_join", "sql": "SELECT DISTINCT c.customer_id, c.name FROM crm.customers c JOIN sales.orders o ON o.customer_id = c.customer_id", "expect_any": ["distinct", "exists", "semi"]}
+{"id": "correlated_subquery", "sql": "SELECT o.order_id, (SELECT MAX(p.paid_at) FROM sales.payments p WHERE p.order_id = o.order_id) AS last_paid FROM sales.orders o", "expect_any": ["correlated", "join", "aggregate", "group"]}
+{"id": "not_in_subquery", "sql": "SELECT customer_id FROM crm.customers WHERE customer_id NOT IN (SELECT customer_id FROM crm.churned)", "expect_any": ["not exists", "anti", "left join", "null"]}
+{"id": "having_instead_of_where", "sql": "SELECT country, COUNT(*) FROM crm.customers GROUP BY country HAVING country = 'NG'", "expect_any": ["where", "having", "filter"]}
+{"id": "cast_join_key", "sql": "SELECT o.order_id, s.status FROM sales.orders o JOIN ops.shipments s ON CAST(o.order_id AS VARCHAR) = s.order_ref", "expect_any": ["cast", "type", "join key", "conversion"]}

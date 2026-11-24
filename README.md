@@ -1,175 +1,136 @@
 # Odos Auditor
 
-[![Odos CI (Unit Only)](https://github.com/odidere/odos_auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/odidere/odos_auditor/actions)
+[![Odos CI](https://github.com/odidere/odos_auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/odidere/odos_auditor/actions)
 
-**Odos Auditor** is a high-performance observability and cost-governance engine designed for enterprise data platforms. It provides deep visibility into Snowflake credit consumption by bridging the gap between raw SQL execution and orchestration metadata.
+Odos finds the queries that suddenly cost more than they should, tells you which pipeline ran them, and asks an LLM for a cheaper rewrite that **a person approves or rejects**. It works with **Snowflake** and **BigQuery**.
 
-By intercepting queries at the driver level, Odos identifies **"Zombie" tasks**, **Infrastructure Waste**, and **Downstream SLA Risks** with zero-to-minimal code changes.
+- **Cost per query, attributed to pipelines.** Odos tags each query with its DAG, task and run through Snowflake's `QUERY_TAG` (or BigQuery job labels), then reads per-query cost from the warehouse's own usage views.
+- **Anomalies against a per-query baseline.** Each query shape gets its own moving baseline, so a nightly job that jumps from $2 to $20 is flagged even when total spend looks normal.
+- **AI suggestions with guardrails.** Only flagged queries go to the model, with literal values redacted. Rewrites are validated and stored for review. Odos never runs them.
+- **Warehouse advice.** Idle cost (billed compute that ran no queries) and right-sizing hints.
 
----
+## How it works
 
-## 🏗 System Architecture
-
-Odos is designed with a "Fail-Open" philosophy, ensuring that observability never compromises production stability.
-
-1.  **The Agent (Instrumentation):** Injects metadata into SQL comments and performs pre-flight AST analysis.
-2.  **The Service (Intelligence):** Uses **SQLAlchemy 2.0** to manage high-concurrency state and calculate statistical baselines (EMA) for cost drift.
-3.  **The Control Plane (UI):** A Streamlit-based dashboard for financial forecasting and remediation.
-4.  **The Persistence:** A relational database (PostgreSQL/SQLite) storing normalized query fingerprints and lineage graphs.
-
----
-
-## 🛠 Prerequisites & Environment
-
-Odos leverages modern Python features (PEP 695) and requires:
-
-- **Python:** 3.12+
-- **Database:** PostgreSQL 15+ (Production) or SQLite (Dev)
-- **Libraries:** `sqlalchemy>=2.0`, `sqlglot`, `pandas`, `fpdf2`, `openai`, `google-genai`
-
-### Environment Configuration (`.env`)
-
-Odos requires a `.env` file in the root directory for credential management:
-
-```env
-# Database
-POSTGRES_USER=your_user
-POSTGRES_PASSWORD=your_secure_password
-POSTGRES_DB=odos_observability
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-
-# AI Intelligence (Required for optimize_sql)
-OPENAI_API_KEY=sk-xxxx
-GEMINI_API_KEY=AIzaSy-xxxx
+```mermaid
+flowchart LR
+    A[Airflow / Dagster / Python<br/>pipelines] -- QUERY_TAG / job labels --> W[(Snowflake / BigQuery)]
+    W -- per-query cost<br/>ACCOUNT_USAGE / INFORMATION_SCHEMA --> S[Audit cycle]
+    S -- baselines, anomalies --> D[(Odos DB<br/>Postgres or SQLite)]
+    D -- HIGH / CRITICAL anomalies --> AI[Surgeon<br/>OpenAI, then Gemini]
+    AI -- validated suggestion --> D
+    D --> UI[API, CLI, dashboard]
+    UI -- approve / reject --> D
 ```
 
-## 🚀 Key Modules
+1. **Tag.** `instrument_all()` sets `QUERY_TAG` to a small JSON payload (`{"odos":1,"dag":...,"task":...,"run":...}`) whenever the pipeline context changes. The query text is never modified, so Snowflake's result cache keeps working.
+2. **Collect.** The Snowflake source reads `QUERY_ATTRIBUTION_HISTORY` (credits per query) joined to `QUERY_HISTORY`. The BigQuery source reads `INFORMATION_SCHEMA.JOBS_BY_PROJECT` and prices bytes billed (on-demand) or slot time (Editions).
+3. **Detect.** Queries are grouped by a stable fingerprint (the warehouse's parameterised hash, or a SHA-256 of the SQL with literals removed). A run is flagged when it costs more than 3x its baseline **and** more than its usual variation, and the excess is at least $1. All thresholds are configurable.
+4. **Suggest.** For new HIGH/CRITICAL anomalies, the Surgeon sends the redacted query to the model, with a timeout and token limit, and checks the answer: valid JSON, one read-only statement, no new tables. Valid rewrites are stored as `PENDING`; anything else is stored as `INVALID` or `FAILED` with the reason.
+5. **Review.** A person approves or rejects each suggestion in the dashboard, API or CLI. Every decision is logged to a JSON Lines file, which shows how often each model's suggestions are accepted.
 
-### 1. Multi-Interface Agent (`odos.agent`)
+## Quick start (demo data, no warehouse needed)
 
-- **Monkey Patching:** Global, zero-touch observability via `instrument_all()`.
-- **Decorators:** Explicit function-level tracking via `@track_pipeline`.
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[api,ui,ai]"
 
-### 2. AI Surgeon (`odos.backend.surgeon`)
+odos init-db                    # creates odos.db (SQLite) unless DATABASE_URL is set
+odos audit --source mock        # 3 demo pipelines, one with a cost spike
+export OPENAI_API_KEY=...       # optional: enables AI suggestions
+odos audit --source mock --suggest
+odos suggestions --status PENDING
+odos approve 1 --reviewer you --note "Checked against prod plan"
 
-The Surgeon module provides automated remediation for identified waste.
-
-[Image of a software architecture diagram showing an AI agent fallback mechanism between OpenAI and Google Gemini]
-
-- **`optimize_sql`**: Performs dual-model (OpenAI/Gemini) analysis to rewrite inefficient SQL.
-- **`diagnose_pipeline_failure`**: Analyzes stack traces to identify root causes in real-time.
-
----
-
-## 🚥 Quick Start & CLI
-
-The `run` script is your master control center.
-
-### Launch the Control Plane (UI)
-
-```Bash
-chmod +x run
-./run ui
+export ODOS_ADMIN_PASSWORD=...  # the dashboard has no default password
+odos ui                         # http://localhost:8501
+odos api                        # http://localhost:8000/docs
 ```
 
-### Launch the API
+## Using it with Snowflake
 
-```Bash
+1. Install: `pip install -e ".[snowflake,postgres,api,ui,ai]"`.
+2. Create a **read-only** role with access to `SNOWFLAKE.ACCOUNT_USAGE` (for example via the `USAGE_VIEWER` and `GOVERNANCE_VIEWER` database roles). Do not use `ACCOUNTADMIN`.
+3. Set `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE` and either `SNOWFLAKE_PRIVATE_KEY_FILE` (preferred) or `SNOWFLAKE_PASSWORD`. See `.env_template`.
+4. Tag your pipelines (next section), then schedule `odos audit --source snowflake --lookback-days 1` (for example hourly). `ACCOUNT_USAGE` views lag by up to a few hours, and re-running over the same window is safe.
 
-./run api
+## Tagging pipelines
+
+```python
+# Any Python pipeline
+from odos.agent.instrument import track_pipeline
+
+@track_pipeline(name="nightly_orders", inputs=["raw.orders"], outputs=["analytics.orders"])
+def nightly_orders():
+    ...  # Snowflake queries in here are tagged; the run and lineage are recorded
+
+# Airflow: a drop-in operator...
+from odos.agent.airflow_plugin import OdosSnowflakeOperator
+# ...or tag every task without changing DAGs: use odos.airflow_local_settings.task_policy
+
+# Dagster
+from odos.agent.dagster_plugin import OdosResource
+
+@asset
+def orders(context, odos: OdosResource):
+    with odos.step(context):
+        ...
+
+# BigQuery: pass the context as job labels
+from odos.agent.context import OdosContext
+job_config = bigquery.QueryJobConfig(labels=OdosContext.bigquery_labels())
 ```
 
-### Run the Test Suite
+## Configuration
 
-```Bash
-./run test
-```
+`config.yaml` (or the file in `ODOS_CONFIG`) overrides the defaults in `odos/config.py`. Secrets come only from environment variables.
 
-## 🧪 Testing Strategy
+| Setting | Default | Meaning |
+|---|---|---|
+| `source.type` | `mock` | `snowflake`, `bigquery` or `mock` (or `ODOS_COST_SOURCE`) |
+| `costs.compute_credit_price` | 3.00 | USD per Snowflake credit: set your contract price |
+| `costs.bigquery_price_per_tib` / `bigquery_slot_hour_price` | 6.25 / 0.06 | BigQuery prices |
+| `detection.*` | 5 runs, 3x, 4 deviations, $1 | When a run counts as an anomaly |
+| `ai.openai_model` / `ai.gemini_model` | `gpt-4.1-mini` / `gemini-2.5-flash` | Models (or `ODOS_OPENAI_MODEL` / `ODOS_GEMINI_MODEL`) |
+| `ai.send_literals` | `false` | Keep literal values out of prompts |
+| `ai.timeout_sec` / `max_output_tokens` | 30 / 1500 | Per-call limits |
 
-Odos maintains a rigorous testing suite divided into two tiers:
+## Evaluating the AI
 
-### Unit Tests (`tests/unit/`)
+`eval/cases.jsonl` holds 12 known-expensive query patterns (non-sargable filters, `UNION` vs `UNION ALL`, correlated subqueries, missing join conditions and more). `odos eval` runs them through your configured provider and reports the share of answers that are valid, safe and name the right technique. Run it whenever you change prompts or models; it costs a few cents.
 
-- Math Logic: Validates Exponential Moving Average (EMA) and ROI calculations.
-- Mocking: Uses pytest-mock to simulate Snowflake and AI provider responses, requiring no active API keys or live database.
-- Execution: `pytest tests/unit/`
+## Safety
 
-### Integration Tests (tests/integration/)
+- **Fail-open:** if tagging or recording fails, the query or pipeline runs unchanged and Odos logs a warning.
+- **No automatic changes:** Odos never executes AI output. Approval records a decision only.
+- **Data minimisation:** literals are redacted before prompts and in stored samples; secrets are masked in stack traces.
+- **Least privilege:** read-only warehouse roles; the API can require `X-API-Key` (`ODOS_API_KEY`); the dashboard needs `ODOS_ADMIN_PASSWORD`.
+- The storage advisor's archival template leaves its `DELETE` commented out.
 
-- Database: Validates SQLAlchemy 2.0 mappings against a live Postgres/SQLite instance.
-- Intelligence: Verifies the EnterpriseAuditor can establish baselines and detect "Whale" cost spikes.
-- Execution: `./run_tests.sh` (Auto-loads `.env`)
-
-## 🛡 Security & Safety Guardrails
-
-- Fail-Open Logic: If metadata injection fails, the original query executes unmodified.
-- Performance Circuit Breaker: Queries exceeding 50KB bypass static analysis to prevent driver-side latency.
-- Privacy: SQL is canonicalized (normalized) locally before being sent to AI providers for diagnosis.
-
-### ⚙️ Configuration Files
-
-`.github/workflows/ci.yml`
+## Project layout
 
 ```
-name: Odos CI (Unit Only)
-
-on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-
-jobs:
-  unit-tests:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-mock sqlalchemy pandas fpdf2 openai google-genai psycopg2-binary sqlglot
-
-      - name: Make run script executable
-        run: chmod +x run
-
-      # Run unit tests only; these use mocks and don't require Postgres
-      - name: Run Odos Unit Tests
-        env:
-          OPENAI_API_KEY: "sk-unit-test-fake-key"
-          GEMINI_API_KEY: "gm-unit-test-fake-key"
-        run: pytest tests/unit/
+odos/
+  agent/        tagging (context, instrument), Airflow and Dagster plugins
+  sources/      Snowflake, BigQuery and mock cost sources
+  backend/      schema, audit cycle, detection, advisor, surgeon, remediation, API, UI
+  fingerprint.py, config.py, cli.py, evaluation.py
+eval/           AI evaluation cases
+tests/          unit and integration tests (offline)
 ```
 
-`run_tests.sh`
+## Roadmap
 
+- Alembic migrations (tables are currently created with `odos init-db`)
+- Before/after cost comparison for approved suggestions
+- Migrate `system_testing/` to the new schema
+- Databricks SQL cost source
+- An agent that answers cost questions from `INFORMATION_SCHEMA` (Google ADK)
+
+## Development
+
+```bash
+pip install -e ".[dev,api,ai,snowflake]"
+pytest -q
 ```
-#!/bin/bash
 
-# Load Environment Variables from .env
-if [ -f .env ]; then
-    echo "Reading .env file..."
-    export $(grep -v '^#' .env | xargs)
-else
-    echo "❌ Error: .env file not found. Ensure POSTGRES_PASSWORD is set for integration tests."
-    exit 1
-fi
-
-# Set additional test-specific variables
-export OPENAI_API_KEY=${OPENAI_API_KEY:-"sk-fake"}
-export GEMINI_API_KEY=${GEMINI_API_KEY:-"gm-fake"}
-
-echo "🧪 Running Odos Unit Tests..."
-pytest tests/unit/
-
-echo "🔗 Running Odos Integration Tests..."
-pytest tests/integration/
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md).

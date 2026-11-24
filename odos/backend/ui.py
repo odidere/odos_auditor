@@ -1,211 +1,217 @@
-import os
-import time
+"""Streamlit dashboard. Start with ``odos ui``.
 
+Login: when ``security.auth_enabled`` is true, set ``ODOS_ADMIN_USER`` and
+``ODOS_ADMIN_PASSWORD``. There is no default password.
+"""
+from __future__ import annotations
+
+import hmac
+import os
+
+import networkx as nx
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit_agraph import Config, Edge, Node, agraph
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
 
-from odos.backend.config_loader import CONFIG
-from odos.backend.cost_engine import CostEngine
-from odos.backend.db import get_db_engine as _get_backend_engine
-from odos.backend.reporting import calculate_efficiency, generate_pdf_binary
-from odos.backend.storage_advisor import StorageAdvisor
-from odos.backend.surgeon import Surgeon
+from odos.backend.cost_engine import CostEngine, suggestion_to_dict
+from odos.backend.db import get_engine, init_db
+from odos.backend.models import Suggestion
+from odos.backend.remediation import ReviewError, approve, reject
+from odos.backend.reporting import generate_pdf_binary
+from odos.config import section
 
-# --- CONFIG & BRANDING ---
-COMPANY_NAME = CONFIG['project'].get('company_name', "Prowess Pictures")
-PROJECT_NAME = "Odos Data Engineering Operating System"
+COMPANY_NAME = section("project").get("company_name", "Odos")
+PROJECT_NAME = section("project").get("name", "Odos Auditor")
 
-st.set_page_config(
-    page_title=f"{COMPANY_NAME} | {PROJECT_NAME}", page_icon="📡", layout="wide")
-
-# --- AUTH & DB ---
+st.set_page_config(page_title=f"{COMPANY_NAME} | {PROJECT_NAME}", page_icon="📡", layout="wide")
 
 
-def check_authentication():
-    if not CONFIG.get('security', {}).get('auth_enabled', False):
+# --- auth -------------------------------------------------------------------
+def check_authentication() -> bool:
+    if not section("security").get("auth_enabled", True):
         return True
-    if st.session_state.get("authenticated", False):
+    if st.session_state.get("authenticated"):
         return True
-    st.markdown(f"## 🔒 {COMPANY_NAME} Control Plane")
+    expected_user = os.getenv("ODOS_ADMIN_USER", "admin")
+    expected_password = os.getenv("ODOS_ADMIN_PASSWORD")
+    st.markdown(f"## {COMPANY_NAME} control plane")
+    if not expected_password:
+        st.error("Set ODOS_ADMIN_PASSWORD to enable login, or set security.auth_enabled: false for local demos.")
+        st.stop()
     with st.form("login_form"):
-        u, p = st.text_input("Username"), st.text_input(
-            "Password", type="password")
-        if st.form_submit_button("Login"):
-            if u == os.getenv("ODOS_ADMIN_USER", "admin") and p == os.getenv("ODOS_ADMIN_PASSWORD", "admin"):
+        user = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.form_submit_button("Log in"):
+            if hmac.compare_digest(user, expected_user) and hmac.compare_digest(password, expected_password):
                 st.session_state["authenticated"] = True
+                st.session_state["reviewer"] = user
                 st.rerun()
-            else:
-                st.error("❌ Access Denied")
+            st.error("Access denied")
     st.stop()
     return False
 
 
+# --- data -------------------------------------------------------------------
 @st.cache_resource
-def get_db_engine():
-    return _get_backend_engine()
+def engine():
+    return init_db(get_engine())
 
 
 @st.cache_data(ttl=60)
-def get_pipeline_catalog():
-    return pd.read_sql("SELECT DISTINCT ON (pipeline_name) * FROM pipeline_runs ORDER BY pipeline_name, start_time DESC", get_db_engine())
+def pipeline_catalog() -> pd.DataFrame:
+    query = text("""
+        SELECT r.* FROM pipeline_runs r
+        JOIN (SELECT pipeline_name, MAX(start_time) AS latest FROM pipeline_runs GROUP BY pipeline_name) l
+          ON r.pipeline_name = l.pipeline_name AND r.start_time = l.latest
+        ORDER BY r.start_time DESC
+    """)
+    with engine().connect() as conn:
+        return pd.read_sql(query, conn)
 
 
 @st.cache_data(ttl=300)
-def get_financial_data():
-    engine = get_db_engine()
-    ce = CostEngine(engine=engine)
-    metrics = ce.get_financial_summary()
-    zombies = ce.get_anomalies(limit=200)
-    return metrics['daily_base'], metrics['daily_waste'], zombies, metrics
+def lineage_graph() -> nx.DiGraph:
+    with engine().connect() as conn:
+        edges = conn.execute(text("SELECT source_node, target_node FROM lineage_edges")).all()
+    graph = nx.DiGraph()
+    graph.add_edges_from((e[0], e[1]) for e in edges)
+    return graph
 
 
-@st.cache_data(ttl=600)
-def get_sql_info(task_id):
-    df = pd.read_sql(
-        f"SELECT sql_text, optimized_sql_text, diagnosis_text FROM query_fingerprints WHERE hash_id = '{task_id}'", get_db_engine())
-    return df.iloc[0] if not df.empty else None
+def downstream(pipeline_name: str) -> pd.DataFrame:
+    graph = lineage_graph()
+    if pipeline_name not in graph:
+        return pd.DataFrame(columns=["affected_asset", "steps"])
+    depths = nx.single_source_shortest_path_length(graph, pipeline_name, cutoff=10)
+    rows = [{"affected_asset": node, "steps": d} for node, d in depths.items() if node != pipeline_name]
+    return pd.DataFrame(rows).sort_values("steps") if rows else pd.DataFrame(columns=["affected_asset", "steps"])
 
 
-def analyze_workload(description):
-    d = description.lower()
-    if "tb" in d or "terabyte" in d:
-        return "2XL", 6, "High Volume: >10TB workloads.", 32
-    if "stream" in d or "real-time" in d:
-        return "XS", 24, "Streaming Pattern: 24/7 ingestion.", 1
-    if "dbt" in d:
-        return "L", 4, "Transformation: dbt parallel execution.", 8
-    return "M", 8, "General Purpose: Standard batch.", 4
+@st.cache_data(ttl=120)
+def financials():
+    ce = CostEngine(engine())
+    return ce.get_financial_summary(), pd.DataFrame(ce.get_anomalies(limit=200))
 
 
-@st.cache_data(ttl=600)
-def get_cached_impact(pipeline_name):
-    query = f"""
-        WITH RECURSIVE downstream AS (
-            SELECT target_node, 1 as distance, ARRAY[target_node]::text[] as path
-            FROM lineage_edges WHERE source_node = '{pipeline_name}'
-            UNION ALL
-            SELECT e.target_node, d.distance + 1, d.path || e.target_node
-            FROM lineage_edges e INNER JOIN downstream d ON e.source_node = d.target_node
-            WHERE d.distance < 10 AND NOT (e.target_node = ANY(d.path))
-        )
-        SELECT d.target_node, n.node_type, n.layer, MIN(d.distance) as depth
-        FROM downstream d JOIN lineage_nodes n ON d.target_node = n.node_id
-        GROUP BY d.target_node, n.node_type, n.layer ORDER BY depth ASC
-    """
-    return pd.read_sql(query, get_db_engine())
-
-# --- UI FRAGMENTS ---
+def load_suggestions(status: str | None) -> list[dict]:
+    with Session(engine()) as s:
+        stmt = select(Suggestion).order_by(Suggestion.created_at.desc()).limit(50)
+        if status:
+            stmt = stmt.where(Suggestion.status == status)
+        return [suggestion_to_dict(x) for x in s.scalars(stmt).all()]
 
 
-@st.fragment
-def render_pipeline_card(row):
-    pid = row['pipeline_name']
-    if f"exp_{pid}" not in st.session_state:
-        st.session_state[f"exp_{pid}"] = False
-    icon = "❌" if row['status'] == 'FAILED' else "✅"
-    with st.container(border=True):
-        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-        with c1:
-            st.markdown(f"### {icon} {pid}")
-            st.caption(
-                f"Last Run: {row['start_time'].strftime('%Y-%m-%d %H:%M')}")
-        with c2:
-            st.metric("Latency", f"{row['duration_sec']:.1f}s")
-        with c3:
-            st.metric("Rows", f"{row['rows_processed']:,}")
-        with c4:
-            if st.button("✖️ Close" if st.session_state[f"exp_{pid}"] else "🔎 Explore", key=f"btn_{pid}"):
-                st.session_state[f"exp_{pid}"] = not st.session_state[f"exp_{pid}"]
-                st.rerun(scope="fragment")
-        if st.session_state[f"exp_{pid}"]:
-            st.divider()
-            ca, cb = st.columns(2)
-            with ca:
-                if row['status'] == 'FAILED':
-                    st.error(f"**Error:** {row['error_message']}")
-                else:
-                    st.success("Health: System nominal.")
-            with cb:
-                st.dataframe(get_cached_impact(pid), column_config={"target_node": "Affected Asset", "depth": st.column_config.NumberColumn(
-                    "Steps", format="%d 🕸️")}, hide_index=True, width="stretch")
+# --- views ------------------------------------------------------------------
+def render_pipelines() -> None:
+    df = pipeline_catalog()
+    if df.empty:
+        st.info("No pipeline runs yet. Decorate a pipeline with @track_pipeline to record runs.")
+        return
+    for _, row in df.head(20).iterrows():
+        icon = "❌" if row["status"] == "FAILED" else "✅"
+        with st.expander(f"{icon} {row['pipeline_name']} · {row['duration_sec']:.1f}s · "
+                         f"{int(row['rows_processed'] or 0):,} rows"):
+            if row["status"] == "FAILED":
+                st.error(row["error_message"])
+            st.dataframe(downstream(row["pipeline_name"]), hide_index=True, width="stretch")
 
 
-@st.fragment
-def render_whale_card(z_row):
-    tid = z_row['task_id']
-    if f"z_exp_{tid}" not in st.session_state:
-        st.session_state[f"z_exp_{tid}"] = False
-    with st.container(border=True):
-        zc1, zc2, zc3 = st.columns([3, 1, 1])
-        with zc1:
-            st.markdown(
-                f"#### {'🔴' if z_row['severity'] == 'HIGH' else '🟡'} {tid}")
-        with zc2:
-            st.metric("Waste", f"${z_row['waste_usd']:.2f}")
-        with zc3:
-            if st.button("✖️ Close" if st.session_state[f"z_exp_{tid}"] else "🛠️ Inspect", key=f"zbtn_{tid}"):
-                st.session_state[f"z_exp_{tid}"] = not st.session_state[f"z_exp_{tid}"]
-                st.rerun(scope="fragment")
-        if st.session_state[f"z_exp_{tid}"]:
-            sql = get_sql_info(tid)
-            if sql is not None:
-                st.code(sql['sql_text'], language="sql")
-                if sql['optimized_sql_text']:
-                    st.info(f"💡 {sql['diagnosis_text']}")
-                    st.code(sql['optimized_sql_text'], language="sql")
+def render_financials(metrics: dict, budget: float) -> None:
+    month_to_date = metrics["daily_spend"] * 30
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Projected monthly spend", f"${month_to_date:,.0f}")
+    c2.metric("Flagged excess (annualised)", f"${metrics['annual_waste']:,.0f}")
+    c3.metric("Efficiency score", f"{metrics['efficiency_score']}%")
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta", value=month_to_date, delta={"reference": budget},
+        gauge={"axis": {"range": [None, budget * 1.5]},
+               "threshold": {"line": {"color": "red", "width": 4}, "value": budget}}))
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"Based on {metrics['days_observed']} day(s) of attributed query cost.")
 
 
-# --- MAIN EXECUTION ---
-if check_authentication():
-    base, waste, zombies, raw_metrics = get_financial_data()
-    burn, waste_ann, mtd = (base + waste) * 365, waste * \
-        365, (base + waste) * 30 * 0.65
-    eff = calculate_efficiency(burn, waste_ann)
-    budget = int(CONFIG['app'].get('budget_cap', 2000))
+def render_anomalies(events: pd.DataFrame) -> None:
+    if events.empty:
+        st.info("No anomalies yet. Run `odos audit` to analyse recent queries.")
+        return
+    cols = ["timestamp", "severity", "dag_id", "task_id", "cost_usd", "baseline_usd", "ratio", "waste_usd", "fingerprint"]
+    st.dataframe(events[[c for c in cols if c in events.columns]], hide_index=True, width="stretch")
 
+
+def render_suggestions() -> None:
+    st.caption("AI suggestions are never executed. Approving records your decision; apply the change yourself.")
+    status = st.selectbox("Status", ["PENDING", "INVALID", "FAILED", "APPROVED", "REJECTED"], index=0)
+    items = load_suggestions(status)
+    if not items:
+        st.info(f"No {status.lower()} suggestions.")
+        return
+    reviewer = st.session_state.get("reviewer") or st.text_input("Your name (recorded with each decision)")
+    for item in items:
+        title = f"#{item['id']} · {item['strategy'] or 'no strategy'} · est. {item['estimated_savings_pct'] or 0}% saving"
+        with st.expander(title):
+            st.write(item["diagnosis"] or "")
+            left, right = st.columns(2)
+            left.markdown("**Original (as sent to the model)**")
+            left.code(item["original_sql"] or "", language="sql")
+            right.markdown("**Suggested**")
+            right.code(item["suggested_sql"] or "", language="sql")
+            if item["validation_notes"]:
+                st.warning(item["validation_notes"])
+            st.caption(f"{item['provider'] or '-'} / {item['model'] or '-'} · {item['latency_ms'] or '-'} ms")
+            if item["status"] == "PENDING":
+                note = st.text_input("Note", key=f"note_{item['id']}")
+                a, r = st.columns(2)
+                for column, label, action in ((a, "Approve", approve), (r, "Reject", reject)):
+                    if column.button(label, key=f"{label}_{item['id']}", disabled=not reviewer):
+                        try:
+                            with Session(engine()) as s:
+                                action(s, item["id"], reviewer, note or None)
+                            st.success(f"{label}d.")
+                            st.rerun()
+                        except ReviewError as exc:
+                            st.error(str(exc))
+
+
+def render_storage() -> None:
+    if not os.getenv("SNOWFLAKE_ACCOUNT"):
+        st.info("Set SNOWFLAKE_* environment variables to scan storage.")
+        return
+    from odos.backend.storage_advisor import StorageAdvisor
+
+    if st.button("Scan for unused tables"):
+        try:
+            ghosts = StorageAdvisor().find_ghost_tables()
+            st.metric("Unused large tables", len(ghosts))
+            st.dataframe(ghosts, hide_index=True, width="stretch")
+        except Exception as exc:
+            st.error(f"Storage scan failed: {exc}")
+
+
+def main() -> None:
+    if not check_authentication():
+        return
+    metrics, events = financials()
+    budget = float(section("app").get("budget_cap", 2000))
     st.title(f"📡 {COMPANY_NAME}: {PROJECT_NAME}")
-    tabs = st.tabs(["🚦 Command Center", "📊 Financial Pulse",
-                   "🐋 Whale Hunter", "🧪 Simulator", "🗄️ Storage Ops", "📑 Reporting"])
-
+    tabs = st.tabs(["Pipelines", "Spend", "Anomalies", "Suggestions", "Storage", "Report"])
     with tabs[0]:
-        df = get_pipeline_catalog()
-        for _, r in df.head(10).iterrows():
-            render_pipeline_card(r)
-
-    with tabs[1]:  # Gauge restored to your requested layout
-        fig = go.Figure(go.Indicator(mode="gauge+number+delta", value=mtd, delta={'reference': budget},
-                                     gauge={'axis': {'range': [None, budget * 1.5]}, 'bar': {'color': "#1C83E1"},
-                                            'threshold': {'line': {'color': "red", 'width': 4}, 'value': budget}}))
-        st.plotly_chart(fig, use_container_width=True)
-
+        render_pipelines()
+    with tabs[1]:
+        render_financials(metrics, budget)
     with tabs[2]:
-        df_z = zombies.groupby('task_id').agg({'waste_usd': 'sum', 'timestamp': 'max', 'severity': lambda x: 'HIGH' if 'HIGH' in list(
-            x) else 'LOW'}).sort_values('waste_usd', ascending=False).reset_index()
-        for _, r in df_z.head(10).iterrows():
-            render_whale_card(r)
-
+        render_anomalies(events)
     with tabs[3]:
-        desc = st.text_area("Workload description:")
-        if st.button("🔮 Calculate"):
-            sz, hr, rsn, mult = analyze_workload(desc)
-            st.info(
-                f"**AI Recommendation:** {sz} Warehouse | **Est. Cost:** ${mult * hr * 3.0:,.2f} | **Logic:** {rsn}")
-
+        render_suggestions()
     with tabs[4]:
-        ghosts = StorageAdvisor().find_ghost_tables()
-        st.metric("Ghost Tables", len(
-            ghosts), delta=f"${len(ghosts)*25:,.0f} Waste/mo", delta_color="inverse")
-        st.dataframe(ghosts, column_config={"table_name": "Database Object", "size_bytes": st.column_config.NumberColumn(
-            "Volume", format="%.2f MB"), "unused_days": st.column_config.NumberColumn("Days Stagnant", format="%d ⏳")}, hide_index=True, width="stretch")
-
+        render_storage()
     with tabs[5]:
-        st.table(pd.DataFrame({"Metric": ["Annual Burn", "Annual Waste", "Efficiency Score"], "Value": [
-                 f"${burn:,.0f}", f"${waste_ann:,.0f}", f"{eff}%"]}))
-        if st.button("🚀 Build PDF"):
-            pdf = generate_pdf_binary(
-                {"burn": burn, "waste": waste_ann, "budget": budget, "efficiency": int(eff)}, zombies, COMPANY_NAME)
-            st.download_button("📥 Download", data=pdf,
-                               file_name=f"{COMPANY_NAME}_Report.pdf")
+        if st.button("Build PDF report"):
+            pdf = generate_pdf_binary({"burn": metrics["annual_burn"], "waste": metrics["annual_waste"],
+                                       "budget": budget, "efficiency": metrics["efficiency_score"]},
+                                      events.to_dict(orient="records"), COMPANY_NAME)
+            st.download_button("Download", data=pdf, file_name=f"{COMPANY_NAME}_cost_report.pdf")
+
+
+main()

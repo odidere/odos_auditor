@@ -1,36 +1,25 @@
-name: Odos CI (Unit Only)
+name: Odos CI
 
 on:
-    push:
-        branches: ["main"]
-    pull_request:
-        branches: ["main"]
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
 
 jobs:
-    unit-tests:
-        runs-on: ubuntu-latest
-
-        steps:
-            - uses: actions/checkout@v4
-
-            - name: Set up Python 3.12
-              uses: actions/setup-python@v5
-              with:
-                  python-version: "3.12"
-
-            - name: Install dependencies
-              run: |
-                  python -m pip install --upgrade pip
-                  # We must install the full requirements because imports are resolved at test collection
-                  if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-                  # Ensure essential testing libs are present
-                  pip install pytest pytest-mock
-
-            - name: Make run script executable
-              run: chmod +x run
-
-            - name: Run Odos Unit Tests
-              env:
-                  OPENAI_API_KEY: "sk-unit-test-fake-key"
-                  GEMINI_API_KEY: "gm-unit-test-fake-key"
-              run: pytest tests/unit/
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,api,ai,snowflake,otel]"
+      - name: Unit and integration tests (SQLite, no network, no API keys)
+        run: pytest -q

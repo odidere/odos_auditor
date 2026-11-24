@@ -1,56 +1,46 @@
 # Contributing to Odos Auditor
 
-Thank you for your interest in improving the Odos Auditor! We welcome contributions, especially those aimed at expanding our ecosystem of data connectors and infrastructure advisors.
+Contributions are welcome, especially new cost sources and advisor rules.
 
-## 🔌 Adding a New Data Connector
+## Development setup
 
-Odos is designed to be warehouse-agnostic. To add support for a new platform (e.g., Databricks, BigQuery), follow these steps:
-
-### 1. Define the Fetcher
-
-Create a new file in `odos/backend/connectors/`. Your class must implement the interface used by the `EnterpriseAuditor`.
-
-```python
-class NewWarehouseConnector:
-    def fetch_attributed_costs(self, lookback_days: int) -> list[dict]:
-        """
-        Required Keys in returned dicts:
-        - DAG_ID, TASK_ID, TRUE_COST_USD, DURATION_SEC, WAREHOUSE_NAME, fingerprint
-        """
-        pass
-```
-
-### 2. Update the Auditor Service
-
-Register your new connector in `odos/backend/service.py` to allow EnterpriseAuditor to initialize with it.
-
-### 3. Add Integration Tests
-
-Add a mock version of your connector to `tests/conftest.py` and verify baseline establishment in `tests/integration/`.
-
-## 🛠 Development Workflow
-
-### Setup
-
-Clone the repo and create a virtual environment:
-
-```Bash
+```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev,api,ai,snowflake]"
+pytest -q
 ```
 
-Create your `.env` file based on the template in the README.
+Tests run on SQLite with fake AI providers: no network, warehouse or API keys needed.
 
-Testing
-We enforce a "Green Suite" policy. Before submitting a PR, ensure all unit tests pass:
+## Adding a cost source
 
-```Bash
-./run test
+A cost source turns a warehouse's query history into `CostRecord`s. Add a module under `odos/sources/`:
+
+```python
+from odos.sources.base import CostRecord
+
+
+class DatabricksCostSource:
+    name = "databricks"
+
+    def fetch_attributed_costs(self, lookback_days: int = 1) -> list[CostRecord]:
+        ...
+
+    # Optional: enables idle-cost and right-sizing advice
+    def fetch_warehouse_usage(self, lookback_days: int = 1): ...
 ```
 
-## 📜 Pull Request Guidelines
+Then register it in `odos/sources/__init__.py:build_source` and add tests that map raw rows to records (see `tests/unit/test_advisor_and_sources.py`).
 
-- Unit Tests: Every new feature must include unit tests in tests/unit/ using pytest-mock.
-- Type Hinting: We use Python 3.12+ Type Parameter syntax (class Auditor[T]).
-- Method Mapping: When adding methods to Surgeon, ensure they are reflected in the test suite method-discovery logic.
+Guidelines:
+
+- **Fingerprints** must be stable across processes. Prefer the warehouse's own parameterised hash; otherwise use `odos.fingerprint.fingerprint`.
+- **Cost** is USD per query run. Document how you calculate it and which prices come from config.
+- **Least privilege:** document the minimum role or permissions the source needs.
+
+## Pull requests
+
+- Add tests for every behaviour change; keep tests offline.
+- Anything sent to an LLM must go through `odos.backend.sql_safety` (redaction and validation).
+- Odos must stay fail-open: instrumentation errors are logged, never raised into the user's pipeline.
