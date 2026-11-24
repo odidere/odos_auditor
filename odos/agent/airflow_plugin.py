@@ -1,37 +1,40 @@
-from typing import Any, Dict
+"""Airflow integration.
 
-from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
-from airflow.utils.context import Context
+``OdosSnowflakeOperator`` is a drop-in replacement for ``SnowflakeOperator``
+(or ``SQLExecuteQueryOperator`` on newer providers) that tags every query it
+runs with the DAG id, task id and run id.
+"""
+from __future__ import annotations
 
-from odos.agent.instrument import OdosContext
+from typing import Any
+
+from odos.agent.context import OdosContext
+from odos.agent.instrument import instrument_all
+
+try:  # apache-airflow-providers-snowflake < 6
+    from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator as _BaseOperator
+except ImportError:  # newer providers: use the generic SQL operator
+    from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator as _BaseOperator
 
 
-class OdosSnowflakeOperator(SnowflakeOperator):
-    """
-    Drop-in replacement for SnowflakeOperator that enables 
-    automated cost attribution and anomaly detection.
-    """
+def airflow_context_kwargs(context: Any) -> dict[str, Any]:
+    ti = context.get("ti") or context.get("task_instance")
+    return {
+        "dag_id": getattr(ti, "dag_id", None) or getattr(context.get("dag"), "dag_id", None),
+        "task_id": getattr(ti, "task_id", None) or getattr(context.get("task"), "task_id", None),
+        "run_id": context.get("run_id"),
+        "metadata": {"orchestrator": "airflow"},
+    }
 
-    def execute(self, context: Context) -> Any:
-        # 1. Capture Identity from Airflow Runtime
-        dag_id = context['dag'].dag_id
-        task_id = context['task'].task_id
-        run_id = context['run_id']
 
-        # 2. Inject Context into the Odos Singleton
-        # The existing instrument.py will pick this up during the SQL hook
-        OdosContext.set_context(
-            dag_id=dag_id,
-            task_id=task_id,
-            metadata={"run_id": run_id, "orchestrator": "airflow"}
-        )
+class OdosSnowflakeOperator(_BaseOperator):
+    """Snowflake SQL operator with Odos cost attribution."""
 
-        self.log.info(f"🔮 Odos: Auditing enabled for {dag_id}.{task_id}")
-
-        # 3. Execute the standard Snowflake logic
-        # The monkey-patched driver will now tag queries with the IDs above
+    def execute(self, context: Any) -> Any:
+        instrument_all()
+        token = OdosContext.set_context(**airflow_context_kwargs(context))
+        self.log.info("Odos: cost attribution enabled for %s.%s", self.dag_id, self.task_id)
         try:
             return super().execute(context)
         finally:
-            # 4. Cleanup to prevent context bleeding
-            OdosContext.clear()
+            OdosContext.clear(token)

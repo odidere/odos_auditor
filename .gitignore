@@ -37,3 +37,8 @@ Thumbs.db
 system_testing/logs/
 system_testing/data/
 system_testing/__pycache__/
+
+# Odos decision logs
+odos_decisions.jsonl
+*.egg-info/
+system_testing/test_artifacts/*.jsonl

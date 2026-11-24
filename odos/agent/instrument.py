@@ -1,234 +1,278 @@
-import json
+"""Pipeline instrumentation.
+
+* :func:`instrument_all` tags every Snowflake query with the current
+  orchestration context through Snowflake's ``QUERY_TAG`` session parameter.
+  The query text is never modified, so Snowflake's result cache keeps working.
+* :func:`track_pipeline` records each pipeline run (duration, rows, errors) and
+  optional lineage, and sets the context for the queries it runs.
+
+Everything here is fail-open: if Odos cannot tag, trace or export, your query
+or pipeline still runs exactly as it would without Odos.
+"""
+from __future__ import annotations
+
+import functools
 import logging
-import os
+import time
 import traceback
-import uuid
-from functools import wraps
+from datetime import datetime, timezone
+from typing import Any, Callable, Iterable
 
-import psycopg2
-import wrapt
-# --- OPENTELEMETRY IMPORTS ---
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import \
-    OTLPSpanExporter
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import (BatchSpanProcessor,
-                                            SimpleSpanProcessor, SpanExporter)
-from opentelemetry.trace import Status, StatusCode
-
-# --- SQL PARSING ---
-try:
-    import sqlglot
-    from sqlglot import exp
-    SQL_AVAILABLE = True
-except ImportError:
-    SQL_AVAILABLE = False
-
-from odos.backend.config_loader import CONFIG
-from odos.backend.db import get_db_connection  # <--- NEW IMPORT
+from odos.agent.context import OdosContext
+from odos.config import section
+from odos.fingerprint import analyze
 
 logger = logging.getLogger("odos.agent")
 
-# --- SETUP ---
-trace.set_tracer_provider(TracerProvider())
-tracer = trace.get_tracer("odos.agent")
-OBS_CONF = CONFIG.get('observability', {})
-
-# --- EXPORTER 1: ODOS (Postgres) ---
+_PATCHED_ATTR = "_odos_original_execute"
 
 
-class PulsePostgresExporter(SpanExporter):
-    """Writes to Odos Postgres for Cost & Efficiency UI."""
-
-    def __init__(self):
-        pass  # Config handled by DB module
-
-    def export(self, spans):
-        conn = None
-        try:
-            conn = get_db_connection()
-            conn.autocommit = True
-            cur = conn.cursor()
-            for span in spans:
-                duration_sec = (span.end_time - span.start_time) / 1e9
-                attrs = span.attributes or {}
-                rows = attrs.get("db.rows_processed", 0)
-                error_msg = attrs.get("error.message", None)
-                stack_trace = attrs.get("error.stack_trace", None)
-                throughput = rows / duration_sec if duration_sec > 0 else 0
-                status_str = 'FAILED' if span.status.status_code == StatusCode.ERROR else 'SUCCESS'
-
-                cur.execute("""
-                    INSERT INTO pipeline_runs 
-                    (pipeline_name, start_time, end_time, duration_sec, status, 
-                     rows_processed, throughput_rows_per_sec, cpu_utilization_pct,
-                     error_message, stack_trace)
-                    VALUES (%s, TO_TIMESTAMP(%s), TO_TIMESTAMP(%s), %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    span.name, span.start_time/1e9, span.end_time/1e9,
-                    duration_sec, status_str, rows, throughput, 0,
-                    error_msg, stack_trace
-                ))
-            return list(map(lambda x: x.context.trace_id, spans))
-        except Exception as e:
-            # logger.error(f"Odos Export Failed: {e}")
-            pass
-        finally:
-            if conn:
-                conn.close()
-
-    def shutdown(self): pass
-
-# --- EXPORTER 2: LINEAGE (Graph) ---
-
-
-class LineageExporter:
-    """Writes Graph Nodes and Edges to Postgres."""
-
-    def __init__(self):
+# ---------------------------------------------------------------------------
+# Query tagging
+# ---------------------------------------------------------------------------
+def _sync_query_tag(cursor: Any, original_execute: Callable) -> None:
+    """Make the session's QUERY_TAG match the current context (one round trip
+    only when the tag changes; nothing when there is no context)."""
+    tag = OdosContext.query_tag()
+    connection = getattr(cursor, "connection", None)
+    holder = connection if connection is not None else cursor
+    last = getattr(holder, "_odos_query_tag", None)
+    if tag == (last or ""):
+        return
+    if tag:
+        original_execute(cursor, "ALTER SESSION SET QUERY_TAG = %s", (tag,))
+    else:
+        # Only unset a tag that Odos itself set.
+        original_execute(cursor, "ALTER SESSION UNSET QUERY_TAG")
+    try:
+        setattr(holder, "_odos_query_tag", tag or None)
+    except Exception:
         pass
 
-    def _get_conn(self):
-        return get_db_connection()
 
-    def register_lineage(self, job_name, inputs, outputs, layer):
-        try:
-            conn = self._get_conn()
-            conn.autocommit = True
-            cur = conn.cursor()
+def instrument_cursor_class(cursor_cls: type) -> bool:
+    """Patch ``cursor_cls.execute`` to keep QUERY_TAG in sync. Idempotent.
 
-            # A. Register JOB Node
-            cur.execute("""
-                INSERT INTO lineage_nodes (node_id, node_type, layer)
-                VALUES (%s, 'JOB', %s)
-                ON CONFLICT (node_id) DO UPDATE SET layer = EXCLUDED.layer
-            """, (job_name, layer))
+    Returns True if the class was patched by this call.
+    """
+    if getattr(cursor_cls, _PATCHED_ATTR, None) is not None:
+        return False
+    original = cursor_cls.execute
 
-            # B. Register INPUTS (Source -> Job)
-            for table in inputs:
-                table_layer = 'RAW' if layer == 'ETL' else 'SILVER'
-                cur.execute(
-                    "INSERT INTO lineage_nodes (node_id, node_type, layer) VALUES (%s, 'TABLE', %s) ON CONFLICT DO NOTHING", (table, table_layer))
-                cur.execute(
-                    "INSERT INTO lineage_edges (source_node, target_node) VALUES (%s, %s) ON CONFLICT DO NOTHING", (table, job_name))
+    @functools.wraps(original)
+    def execute(self, *args, **kwargs):
+        if section("observability").get("tag_mode", "query_tag") == "query_tag":
+            try:
+                _sync_query_tag(self, original)
+            except Exception as exc:  # fail open: never block the user's query
+                logger.debug("Odos: could not set QUERY_TAG (%s)", exc)
+        return original(self, *args, **kwargs)
 
-            # C. Register OUTPUTS (Job -> Target)
-            for table in outputs:
-                target_layer = 'SILVER' if layer == 'ETL' else 'GOLD'
-                cur.execute(
-                    "INSERT INTO lineage_nodes (node_id, node_type, layer) VALUES (%s, 'TABLE', %s) ON CONFLICT DO NOTHING", (table, target_layer))
-                cur.execute(
-                    "INSERT INTO lineage_edges (source_node, target_node) VALUES (%s, %s) ON CONFLICT DO NOTHING", (job_name, table))
-
-            conn.close()
-            logger.info(f"🕸️  Lineage captured for {job_name}")
-        except Exception as e:
-            logger.error(f"❌ Lineage Export Failed: {e}")
+    setattr(cursor_cls, _PATCHED_ATTR, original)
+    cursor_cls.execute = execute
+    return True
 
 
-# --- REGISTER OTel EXPORTERS ---
-if OBS_CONF.get('odos_export', True):
-    trace.get_tracer_provider().add_span_processor(
-        SimpleSpanProcessor(PulsePostgresExporter()))
+def uninstrument_cursor_class(cursor_cls: type) -> None:
+    original = getattr(cursor_cls, _PATCHED_ATTR, None)
+    if original is not None:
+        cursor_cls.execute = original
+        delattr(cursor_cls, _PATCHED_ATTR)
 
-if OBS_CONF.get('otlp_export', False):
-    otlp_endpoint = OBS_CONF.get('otlp_endpoint', "http://localhost:4317")
-    otlp_exporter = OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True)
-    trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(otlp_exporter))
-    logger.info(f"✅ Odos: OTLP Export Active -> {otlp_endpoint}")
 
-# --- SQL FINGERPRINTING & CONTEXT ---
+def instrument_all() -> bool:
+    """Enable Snowflake query tagging for this process. Safe to call repeatedly.
+
+    Returns False when the Snowflake connector is not installed.
+    """
+    try:
+        import snowflake.connector.cursor as sf_cursor
+    except ImportError:
+        logger.info("Odos: snowflake-connector-python not installed; tagging disabled")
+        return False
+    if instrument_cursor_class(sf_cursor.SnowflakeCursor):
+        logger.info("Odos: Snowflake query tagging active")
+    return True
+
+
+# Old name kept for compatibility.
+auto_instrument = instrument_all
 
 
 class SQLAnalyzer:
+    """Compatibility wrapper around :func:`odos.fingerprint.analyze`."""
+
     @staticmethod
-    def safe_analyze(sql_query: str):
-        if not SQL_AVAILABLE or len(sql_query) > 50000:
-            return {}
+    def safe_analyze(sql_query: str) -> dict:
         try:
-            parsed = sqlglot.parse_one(sql_query)
-            canonical = parsed.sql(comments=False).lower()
-            return {
-                "fingerprint": str(abs(hash(canonical)) % (10**12)),
-                "complexity": len(list(parsed.find_all(exp.Expression))),
-                "tables": list(set(t.name for t in parsed.find_all(exp.Table)))
-            }
-        except:
+            return analyze(sql_query)
+        except Exception:
             return {}
 
 
-class OdosContext:
-    @classmethod
-    def get_metadata(cls, analysis=None):
-        span = trace.get_current_span()
-        if span != trace.NonRecordingSpan(None):
-            ctx_trace_id = f"{span.get_span_context().trace_id:032x}"
-            mode = "pipeline"
-        else:
-            ctx_trace_id = str(uuid.uuid4())
-            mode = "standalone"
-
-        ctx = {"trace_id": ctx_trace_id, "mode": mode,
-               "app": CONFIG['project']['name']}
-        if analysis:
-            ctx.update(analysis)
-        return json.dumps(ctx)
+# ---------------------------------------------------------------------------
+# Tracing and run export
+# ---------------------------------------------------------------------------
+_tracer = None
+_db_ready = False
 
 
-def _pf_wrapper(wrapped, instance, args, kwargs):
-    sql = args[0]
+def _ensure_db() -> None:
+    """Create the Odos tables once per process before the agent writes to them."""
+    global _db_ready
+    if not _db_ready:
+        from odos.backend.db import init_db
+
+        init_db()
+        _db_ready = True
+
+
+def _record_run(values: dict[str, Any]) -> None:
+    """Write one pipeline run to the Odos database (fail-open)."""
+    if not section("observability").get("odos_export", True):
+        return
     try:
-        meta = OdosContext.get_metadata(SQLAnalyzer.safe_analyze(sql))
-        return wrapped(f"{sql}\n-- {meta}", *args[1:], **kwargs)
-    except Exception:
-        return wrapped(*args, **kwargs)
+        from odos.backend.db import session_scope
+        from odos.backend.models import PipelineRun
+
+        _ensure_db()
+        with session_scope() as session:
+            session.add(PipelineRun(**values))
+    except Exception as exc:
+        logger.warning("Odos: could not record pipeline run %s (%s)", values.get("pipeline_name"), exc)
 
 
-def auto_instrument():
-    import snowflake.connector.cursor
-    if not hasattr(snowflake.connector.cursor.SnowflakeCursor.execute, '_pf'):
-        wrapt.wrap_function_wrapper(
-            'snowflake.connector.cursor', 'SnowflakeCursor.execute', _pf_wrapper)
-        snowflake.connector.cursor.SnowflakeCursor.execute._pf = True
-        logger.info("✅ Odos: Snowflake Auto-Instrumentation Active")
+def get_tracer():
+    """Odos's own OpenTelemetry tracer (does not replace your global provider).
 
-# --- THE UNIFIED DECORATOR ---
-
-
-def track_pipeline(name: str = None, inputs: list = [], outputs: list = [], layer: str = "ETL"):
+    Spans go to an OTLP collector when ``observability.otlp_export`` is true.
+    Returns None when OpenTelemetry is not installed.
     """
-    The Single Source of Truth for:
-    1. Pipeline Execution Logs (Start/End/Error)
-    2. Data Lineage Graph (Source -> Job -> Target)
-    3. SQL Cost Tracking (Auto-Instrumentation)
+    global _tracer
+    if _tracer is not None:
+        return _tracer
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+    except ImportError:
+        return None
+    provider = TracerProvider()
+    obs = section("observability")
+    if obs.get("otlp_export"):
+        try:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+            endpoint = obs.get("otlp_endpoint", "http://localhost:4317")
+            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True)))
+        except Exception as exc:
+            logger.warning("Odos: OTLP export not available (%s)", exc)
+    _tracer = provider.get_tracer("odos.agent")
+    return _tracer
+
+
+def register_lineage(job_name: str, inputs: Iterable[str], outputs: Iterable[str], layer: str = "ETL") -> None:
+    """Record Source -> Job -> Target edges (fail-open, idempotent)."""
+    try:
+        from odos.backend.db import session_scope
+        from odos.backend.models import LineageEdge, LineageNode
+
+        def upsert_node(session, node_id, node_type, node_layer):
+            node = session.get(LineageNode, node_id)
+            if node is None:
+                session.add(LineageNode(node_id=node_id, node_type=node_type, layer=node_layer))
+            elif node_type == "JOB":
+                node.layer = node_layer
+
+        def add_edge(session, source, target):
+            if session.get(LineageEdge, (source, target)) is None:
+                session.add(LineageEdge(source_node=source, target_node=target))
+
+        _ensure_db()
+        with session_scope() as session:
+            upsert_node(session, job_name, "JOB", layer)
+            for table in inputs:
+                upsert_node(session, table, "TABLE", "RAW" if layer == "ETL" else "SILVER")
+                add_edge(session, table, job_name)
+            for table in outputs:
+                upsert_node(session, table, "TABLE", "SILVER" if layer == "ETL" else "GOLD")
+                add_edge(session, job_name, table)
+    except Exception as exc:
+        logger.warning("Odos: lineage export failed for %s (%s)", job_name, exc)
+
+
+def track_pipeline(
+    name: str | None = None,
+    inputs: Iterable[str] | None = None,
+    outputs: Iterable[str] | None = None,
+    layer: str = "ETL",
+):
+    """Decorator: records the run, tags its Snowflake queries and captures lineage.
+
+    If the decorated function returns an ``int``, it is recorded as rows processed.
     """
+    inputs = list(inputs or [])
+    outputs = list(outputs or [])
+
     def decorator(func):
-        @wraps(func)
+        pipeline_name = name or func.__name__
+
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # 1. Ensure SQL tagging is active
-            auto_instrument()
-
-            pipeline_name = name or func.__name__
-
-            # 2. Capture Lineage (New Feature)
+            instrument_all()
             if inputs or outputs:
-                exporter = LineageExporter()
-                exporter.register_lineage(
-                    pipeline_name, inputs, outputs, layer)
+                register_lineage(pipeline_name, inputs, outputs, layer)
 
-            # 3. Track Execution (Observability)
-            with tracer.start_as_current_span(pipeline_name) as span:
-                try:
-                    result = func(*args, **kwargs)
-                    rows = result if isinstance(result, int) else 0
-                    span.set_attribute("db.rows_processed", rows)
-                    span.set_status(Status(StatusCode.OK))
-                    return result
-                except Exception as e:
-                    span.set_status(Status(StatusCode.ERROR, str(e)))
-                    span.set_attribute("error.message", str(e))
-                    span.set_attribute("error.stack_trace",
-                                       traceback.format_exc())
-                    raise e
+            existing = OdosContext.current()
+            token = OdosContext.set_context(
+                dag_id=existing.get("dag") or pipeline_name,
+                task_id=existing.get("task") or func.__name__,
+                run_id=existing.get("run"),
+            )
+            tracer = get_tracer()
+            span_cm = tracer.start_as_current_span(pipeline_name) if tracer else None
+            span = span_cm.__enter__() if span_cm else None
+            started = datetime.now(timezone.utc).replace(tzinfo=None)
+            t0 = time.perf_counter()
+            status, error, stack, rows = "SUCCESS", None, None, 0
+            try:
+                result = func(*args, **kwargs)
+                rows = result if isinstance(result, int) and not isinstance(result, bool) else 0
+                return result
+            except Exception as exc:
+                status, error, stack = "FAILED", str(exc), traceback.format_exc()
+                raise
+            finally:
+                duration = time.perf_counter() - t0
+                trace_id = None
+                if span is not None:
+                    try:
+                        span.set_attribute("db.rows_processed", rows)
+                        if error:
+                            from opentelemetry.trace import Status, StatusCode
+
+                            span.set_status(Status(StatusCode.ERROR, error))
+                        trace_id = f"{span.get_span_context().trace_id:032x}"
+                    except Exception:
+                        pass
+                    span_cm.__exit__(None, None, None)
+                ctx = OdosContext.current()
+                OdosContext.clear(token)
+                _record_run({
+                    "pipeline_name": pipeline_name,
+                    "dag_id": ctx.get("dag"),
+                    "task_id": ctx.get("task"),
+                    "run_id": ctx.get("run"),
+                    "trace_id": trace_id,
+                    "start_time": started,
+                    "end_time": datetime.now(timezone.utc).replace(tzinfo=None),
+                    "duration_sec": duration,
+                    "status": status,
+                    "rows_processed": rows,
+                    "throughput_rows_per_sec": rows / duration if duration > 0 else 0.0,
+                    "error_message": error,
+                    "stack_trace": stack,
+                })
+
         return wrapper
+
     return decorator

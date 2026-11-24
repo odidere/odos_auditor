@@ -1,20 +1,19 @@
-#!/bin/bash
-# run_tests.sh
+#!/usr/bin/env bash
+# Convenience wrapper. Usage: ./run [ui|api|audit|test|demo]
+set -euo pipefail
 
-# 1. Load Credentials
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
-else
-    echo "⚠️  No .env found. Ensure POSTGRES_PASSWORD is set manually."
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
 fi
 
-# 2. Python Version Check (Requirement for [T] syntax)
-PYTHON_VER=$(python3 -c 'import sys; print(sys.version_info[:2] >= (3, 12))')
-if [ "$PYTHON_VER" = "False" ]; then
-    echo "❌ Error: Odos Service requires Python 3.12+ for Type Parameter syntax."
-    exit 1
-fi
-
-# 3. Execution
-echo "🚀 Running Odos Intelligence Suite..."
-pytest tests/unit/ tests/integration/
+case "${1:-help}" in
+  ui)    odos ui ;;
+  api)   odos api ;;
+  audit) shift; odos audit "$@" ;;
+  test)  pytest -q ;;
+  demo)  odos init-db && odos audit --source mock && odos ui ;;
+  *)     echo "Usage: ./run [ui|api|audit|test|demo]"; exit 1 ;;
+esac

@@ -1,70 +1,57 @@
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from odos.backend.models import Base, QueryFingerprint
+
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path, monkeypatch):
+    """Each test gets default config, a fresh working dir and no real credentials."""
+    from odos.config import reload_config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ODOS_CONFIG", str(tmp_path / "missing.yaml"))
+    for var in ("DATABASE_URL", "POSTGRES_HOST", "OPENAI_API_KEY", "GEMINI_API_KEY", "ODOS_API_KEY",
+                "ODOS_COST_SOURCE", "SNOWFLAKE_ACCOUNT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ODOS_DECISIONS_PATH", str(tmp_path / "decisions.jsonl"))
+    reload_config()
+    yield
+    reload_config()
 
 
 @pytest.fixture
 def db_session():
-    """
-    Sets up an in-memory SQLite DB for isolated logic testing.
-    Uses StaticPool to ensure the connection stays open during the test lifecycle.
-    """
-    # SQLite in-memory requires StaticPool to maintain the schema between setup and test
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    """In-memory SQLite session with the full Odos schema."""
+    pytest.importorskip("sqlalchemy")
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from odos.backend.models import Base
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
     yield session
-
     session.close()
     engine.dispose()
 
 
-@pytest.fixture
-def aged_fingerprint(db_session):
-    """
-    Seeds a fingerprint with established baselines.
-    This bypasses the 'warm-up' guardrails (execution_count > 5).
-    """
-    fp = QueryFingerprint(
-        hash_id="sig1",
-        avg_cost_usd=1.0,
-        execution_count=10,
-        avg_duration_sec=5.0
-    )
-    db_session.add(fp)
-    db_session.commit()
-    # Expire to ensure the session fetches fresh data during the test
-    db_session.refresh(fp)
-    return fp
+class FakeProvider:
+    """Stands in for OpenAI/Gemini. Returns queued responses or raises queued errors."""
 
+    def __init__(self, name="fake", responses=None, model="fake-1"):
+        self.name = name
+        self.model = model
+        self.responses = list(responses or [])
+        self.prompts = []
 
-class MockSF:
-    """
-    Mock Snowflake Provider to simulate warehouse cost and duration data.
-    """
-
-    def __init__(self):
-        self.return_data = []
-
-    def set_return_data(self, data: list):
-        """Define the Snowflake 'response' for the current test case."""
-        self.return_data = data
-
-    def fetch_attributed_costs(self, lookback_days: int):
-        """Simulates the raw Snowflake fetch used by the EnterpriseAuditor."""
-        return self.return_data
+    def complete_json(self, system, prompt):
+        self.prompts.append(prompt)
+        item = self.responses.pop(0) if self.responses else RuntimeError("no response queued")
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 @pytest.fixture
-def mock_sf():
-    """Provides a fresh Snowflake mock for every test."""
-    return MockSF()
+def fake_provider_cls():
+    return FakeProvider

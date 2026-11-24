@@ -1,51 +1,65 @@
+# Odos configuration. Anything left out falls back to the defaults in odos/config.py.
+# Secrets (passwords, API keys) belong in environment variables, never here.
+
 project:
-  name: "Odos Data Engineering Operating System"
-  environment: "demo"
+  name: "Odos Auditor"
+  company_name: "Odos Demo"
 
 app:
-  budget_cap: 5000
+  budget_cap: 5000            # monthly budget in USD for the spend gauge
 
-database:
-  host: "localhost"
-  port: 5432
-  user: "user"
-  dbname: "odos_observability"
+source:
+  type: "mock"                # snowflake | bigquery | mock (or set ODOS_COST_SOURCE)
+  lookback_days: 1
+  bigquery_region: "us"       # e.g. us, eu, europe-west2
 
 observability:
-  odos_export: true   # Send to our UI (Postgres)
-  otlp_export: false  # Send to Prometheus/Jaeger (via OTel Collector)
+  odos_export: true           # record @track_pipeline runs in the Odos database
+  otlp_export: false          # also send spans to an OpenTelemetry collector
   otlp_endpoint: "http://localhost:4317"
+  tag_mode: "query_tag"       # query_tag | off
 
+costs:
+  compute_credit_price: 3.00  # USD per Snowflake credit (check your contract)
+  storage_price_per_tb_mo: 23.00
+  bigquery_price_per_tib: 6.25
+  bigquery_slot_hour_price: 0.06
 
-slack:
+detection:
+  min_runs: 5
+  ratio_threshold: 3.0
+  deviation_k: 4.0
+  min_waste_usd: 1.0
+  alpha: 0.2
+
+ai:
   enabled: true
-  webhook_url: "https://hooks.slack.com/services/..."
+  max_suggestions_per_cycle: 10
+  timeout_sec: 30
+  max_output_tokens: 1500
+  openai_model: "gpt-4.1-mini"     # override with ODOS_OPENAI_MODEL
+  gemini_model: "gemini-2.5-flash" # override with ODOS_GEMINI_MODEL
+  send_literals: false             # keep literal values out of prompts
+  dialect: "snowflake"
 
-# ----------------------------------------------------
-# 🧠 BUSINESS LOGIC & RULES
-# ----------------------------------------------------
+advisor:
+  idle_ratio_threshold: 0.4
+  min_idle_cost_usd: 5.0
+  downsize_max_avg_duration_sec: 10
+  downsize_min_queries: 50
+
 rules:
   ghost_tables:
     days_since_last_access: 90
-    min_size_bytes: 1024       # 1KB (Demo) vs 1073741824 (1GB Prod)
-  
+    min_size_bytes: 1073741824       # 1 GB
   cold_data:
     min_data_age_days: 365
-    min_size_bytes: 1024       # 1KB (Demo) vs 1099511627776 (1TB Prod)
-    target_tables_regex: "%(LOG|EVENT|HISTORY)%"
-
+    min_size_bytes: 1099511627776    # 1 TB
+    target_tables_regex: ".*(LOG|EVENT|HISTORY).*"
   clustering:
-    min_scan_ratio: 0.0        # 0.0 (Demo) vs 0.9 (Prod)
-    min_size_bytes: 1024       # 1KB (Demo) vs 10GB Prod
-    min_partitions: 0          # 0 (Demo) vs 100 (Prod)
-
-costs:
-  storage_price_per_tb_mo: 23.00
-  compute_credit_price: 3.00
-  
-anomalies:
-  high_severity_threshold_usd: 15.0
-  lookback_days: 30
+    min_scan_ratio: 0.9
+    min_size_bytes: 10737418240      # 10 GB
+    min_partitions: 100
 
 security:
-  auth_enabled: true
+  auth_enabled: true          # UI login; requires ODOS_ADMIN_PASSWORD
